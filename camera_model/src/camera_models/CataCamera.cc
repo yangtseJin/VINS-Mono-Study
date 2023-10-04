@@ -930,7 +930,7 @@ void
 CataCamera::setParameters(const CataCamera::Parameters& parameters)
 {
     mParameters = parameters;
-
+    // 检查图片是否去过畸变
     if ((mParameters.k1() == 0.0) &&
         (mParameters.k2() == 0.0) &&
         (mParameters.p1() == 0.0) &&
@@ -943,6 +943,7 @@ CataCamera::setParameters(const CataCamera::Parameters& parameters)
         m_noDistortion = false;
     }
 
+    // 为了后续计算进行的一些预处理
     m_inv_K11 = 1.0 / mParameters.gamma1();
     m_inv_K13 = -mParameters.u0() / mParameters.gamma1();
     m_inv_K22 = 1.0 / mParameters.gamma2();

@@ -48,13 +48,17 @@ class FeatureTracker
 
     cv::Mat mask;
     cv::Mat fisheye_mask;
-    cv::Mat prev_img, cur_img, forw_img;
+    cv::Mat prev_img,
+    cur_img, // 这里是指上一帧图像
+    forw_img;   // 均衡化之后的图像,也是当前图像
     vector<cv::Point2f> n_pts;
-    vector<cv::Point2f> prev_pts, cur_pts, forw_pts;
+    vector<cv::Point2f> prev_pts,
+    cur_pts,
+    forw_pts;   // 当前帧的特征点信息，使用前要clear清空，不然会保存上一帧的特征点
     vector<cv::Point2f> prev_un_pts, cur_un_pts;
     vector<cv::Point2f> pts_velocity;
     vector<int> ids;
-    vector<int> track_cnt;
+    vector<int> track_cnt;  // 追踪点计数
     map<int, cv::Point2f> cur_un_pts_map;
     map<int, cv::Point2f> prev_un_pts_map;
     camodocal::CameraPtr m_camera;

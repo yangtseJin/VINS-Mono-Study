@@ -13,6 +13,7 @@ bool inBorder(const cv::Point2f &pt)
 // 根据状态位，进行“瘦身”
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status)
 {
+    // 这里用的是双指针算法来实现“瘦身”，空间复杂度为O(0)，时间复杂度为O(n)，是理论上的最优解算法
     int j = 0;
     for (int i = 0; i < int(v.size()); i++)
         if (status[i])
@@ -99,9 +100,9 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     TicToc t_r;
     cur_time = _cur_time;
 
-    if (EQUALIZE)
+    if (EQUALIZE)   // 是否均衡化
     {
-        // 图像太暗或者太亮，提特征点比较难，所以均衡化一下
+        // 图像太暗或者太亮，提特征点比较难，所以均衡化一下，提升对比度，方便提取角点
         // ! opencv 函数看一下
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
         TicToc t_c;
@@ -130,7 +131,11 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         vector<float> err;
         // 调用opencv函数进行光流追踪
         // Step 1 通过opencv光流追踪给的状态位剔除outlier
-        cv::calcOpticalFlowPyrLK(cur_img, forw_img, cur_pts, forw_pts, status, err, cv::Size(21, 21), 3);
+        cv::calcOpticalFlowPyrLK(cur_img, forw_img,
+                                 cur_pts,   // 输入，上一帧的特征点
+                                 forw_pts,  // 输出，当前帧的特征点
+                                 status,    // 每个特征点是否追踪成功的标志位
+                                 err, cv::Size(21, 21), 3);
 
         for (int i = 0; i < int(forw_pts.size()); i++)
             // Step 2 通过图像边界剔除outlier
@@ -190,10 +195,12 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     prev_time = cur_time;
 }
 
-/**
- * @brief 
+/*
+ * @brief 根据对极约束剔除外点
  * 
  */
+// 通过对极约束去除外点是在要给后端发送消息时进行的
+// 不是每一帧都做，只给要发送的帧做，主要为了节约时间，还要保证给后端发送的数据的质量
 void FeatureTracker::rejectWithF()
 {
     // 当前被追踪到的光流至少8个点
@@ -206,23 +213,34 @@ void FeatureTracker::rejectWithF()
         {
             Eigen::Vector3d tmp_p;
             // 得到相机归一化坐标系的值
-            m_camera->liftProjective(Eigen::Vector2d(cur_pts[i].x, cur_pts[i].y), tmp_p);
+            // 对上一帧图像特征点的处理
+            m_camera->liftProjective(Eigen::Vector2d(cur_pts[i].x, cur_pts[i].y), // 当前点的像素坐标
+                                     tmp_p  // 通过去畸变，将像素坐标系投影到相机坐标系，由于深度不知道，所以一般让Z=1，即投影到归一化平面
+                                     );
             // 这里用一个虚拟相机，原因同样参考https://github.com/HKUST-Aerial-Robotics/VINS-Mono/issues/48
             // 这里有个好处就是对F_THRESHOLD和相机无关
             // 投影到虚拟相机的像素坐标系
-            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
-            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
-            un_cur_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
+            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;   // X = fx * X/Z + cx, cx= COL/2
+            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;   // y = fy * y/Z + cy, cy= ROW/2
+            un_cur_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());  // 前一帧图像特征点在像素坐标系下去畸变的像素坐标
 
+            // 对当前帧图像特征点的处理
             m_camera->liftProjective(Eigen::Vector2d(forw_pts[i].x, forw_pts[i].y), tmp_p);
             tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
             tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
-            un_forw_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
+            un_forw_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y()); // 当前帧图像特征点在像素坐标系下去畸变的像素坐标
         }
 
         vector<uchar> status;
         // opencv接口计算本质矩阵，某种意义也是一种对级约束的outlier剔除
-        cv::findFundamentalMat(un_cur_pts, un_forw_pts, cv::FM_RANSAC, F_THRESHOLD, 0.99, status);
+        // 前面使用虚拟相机的做法，将图像投影到归一化平面上，就是为了当使用不同相机时不用改变F_THRESHOLD的参数
+        // 对性能或多或少会产生一些影响，但是是可以接受的
+        cv::findFundamentalMat(un_cur_pts, un_forw_pts, cv::FM_RANSAC,
+                                // 由于有对极约束，同一个特征点在第二张图的位置，如果和极线的距离超过了阈值，就认为是outlier，这个极线由第一张图特征点所在的位置和两个相机的外参所决定
+                               F_THRESHOLD,
+                               0.99,
+                               status   // 这里的目的不是计算得到本质矩阵，而是为了得到status
+                               );
         int size_a = cur_pts.size();
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);

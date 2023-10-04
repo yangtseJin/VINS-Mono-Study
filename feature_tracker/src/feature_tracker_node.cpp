@@ -88,10 +88,13 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 
     cv::Mat show_img = ptr->image;
     TicToc t_r;
-    for (int i = 0; i < NUM_OF_CAM; i++)
+
+    // 接下来就是光流追踪部分
+    for (int i = 0; i < NUM_OF_CAM; i++)    // 由于是单目VIO，NUM_OF_CAM始终是1
     {
         ROS_DEBUG("processing camera %d", i);
         if (i != 1 || !STEREO_TRACK)
+            // 根据i的值来读取图片，单目i为0，只读取一次，双目i为0和1，共读取两次
             trackerData[i].readImage(ptr->image.rowRange(ROW * i, ROW * (i + 1)), img_msg->header.stamp.toSec());
         else
         {
