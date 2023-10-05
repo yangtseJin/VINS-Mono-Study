@@ -52,9 +52,9 @@ void readParameters(ros::NodeHandle &n)
     fsSettings["imu_topic"] >> IMU_TOPIC;
 
     SOLVER_TIME = fsSettings["max_solver_time"];    // 单次优化最大求解时间
-    NUM_ITERATIONS = fsSettings["max_num_iterations"];  // 单词优化最大迭代次数
+    NUM_ITERATIONS = fsSettings["max_num_iterations"];  // 单次优化最大迭代次数
     MIN_PARALLAX = fsSettings["keyframe_parallax"]; // 根据视差确定关键帧
-    MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;
+    MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;     // 虚拟相机的trick
 
     std::string OUTPUT_PATH;
     fsSettings["output_path"] >> OUTPUT_PATH;
@@ -78,7 +78,7 @@ void readParameters(ros::NodeHandle &n)
     ROS_INFO("ROW: %f COL: %f ", ROW, COL);
 
     ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];
-    if (ESTIMATE_EXTRINSIC == 2)
+    if (ESTIMATE_EXTRINSIC == 2)    // 如果标志位为2，说明没有任何先验，要从0开始标外参
     {
         ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
         RIC.push_back(Eigen::Matrix3d::Identity());
@@ -88,12 +88,12 @@ void readParameters(ros::NodeHandle &n)
     }
     else 
     {
-        if ( ESTIMATE_EXTRINSIC == 1)
+        if ( ESTIMATE_EXTRINSIC == 1)   // 如果标志位为1，说明有一个比价好的任何先验，不用0开始标外参，直接将真值送给后端的滑窗优化器
         {
             ROS_WARN(" Optimize extrinsic param around initial guess!");
             EX_CALIB_RESULT_PATH = OUTPUT_PATH + "/extrinsic_parameter.csv";
         }
-        if (ESTIMATE_EXTRINSIC == 0)
+        if (ESTIMATE_EXTRINSIC == 0)     // 外参足够的精确，一般是数据集上，外参比较精确，后端的滑窗优化器不会对其进行优化，认为是固定值
             ROS_WARN(" fix extrinsic param ");
 
         cv::Mat cv_R, cv_T;
@@ -105,15 +105,15 @@ void readParameters(ros::NodeHandle &n)
         cv::cv2eigen(cv_T, eigen_T);
         Eigen::Quaterniond Q(eigen_R);
         eigen_R = Q.normalized();
-        RIC.push_back(eigen_R);
-        TIC.push_back(eigen_T);
+        RIC.push_back(eigen_R);     // 旋转外参初值
+        TIC.push_back(eigen_T);     // 平移外参初值
         ROS_INFO_STREAM("Extrinsic_R : " << std::endl << RIC[0]);
         ROS_INFO_STREAM("Extrinsic_T : " << std::endl << TIC[0].transpose());
         
     } 
 
-    INIT_DEPTH = 5.0;
-    BIAS_ACC_THRESHOLD = 0.1;
+    INIT_DEPTH = 5.0;   // 特征点深度的默认值
+    BIAS_ACC_THRESHOLD = 0.1;   // 没用到
     BIAS_GYR_THRESHOLD = 0.1;
 
     // 传感器时间延时相关
