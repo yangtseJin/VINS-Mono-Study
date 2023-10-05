@@ -112,7 +112,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 #endif
     }
 
-    for (unsigned int i = 0;; i++)
+    for (unsigned int i = 0;; i++)  // 新提取的特征点是没有ID的，它们的ID=-1，这里给这些特征点赋值ID
     {
         bool completed = false;
         for (int j = 0; j < NUM_OF_CAM; j++)

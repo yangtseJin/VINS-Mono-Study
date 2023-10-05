@@ -465,7 +465,7 @@ PinholeCamera::liftProjective(const Eigen::Vector2d& p, Eigen::Vector3d& P) cons
     }
     else
     {
-        if (0)
+        if (0)  // 这里就不用看了
         {
             double k1 = mParameters.k1();
             double k2 = mParameters.k2();
@@ -494,12 +494,14 @@ PinholeCamera::liftProjective(const Eigen::Vector2d& p, Eigen::Vector3d& P) cons
             int n = 8;
             Eigen::Vector2d d_u;
             // 这里mx_d + du = 畸变后
+            // 注意，distortion()函数在定义中第一个参数应该传入未畸变点的坐标，但是这里实际传入的是畸变点的坐标
+            // 这里使用线性逼近的方法来求解去畸变，比OpenCV自带的API快
             distortion(Eigen::Vector2d(mx_d, my_d), d_u);
             // Approximate value
-            mx_u = mx_d - d_u(0);
+            mx_u = mx_d - d_u(0);   // du = mx_d - mx_u ,所以 there is mx_u = mx_d - d_u(0)
             my_u = my_d - d_u(1);
 
-            for (int i = 1; i < n; ++i)
+            for (int i = 1; i < n; ++i) // 多次迭代，线性逼近去畸变的点坐标
             {
                 distortion(Eigen::Vector2d(mx_u, my_u), d_u);
                 mx_u = mx_d - d_u(0);

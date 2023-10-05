@@ -45,13 +45,17 @@ void FeatureTracker::setMask()
     
 
     // prefer to keep features that are tracked for long time
-    vector<pair<int, pair<cv::Point2f, int>>> cnt_pts_id;
+    vector< pair<int,pair<cv::Point2f, int>>> cnt_pts_id;
 
     for (unsigned int i = 0; i < forw_pts.size(); i++)
-        cnt_pts_id.push_back(make_pair(track_cnt[i], make_pair(forw_pts[i], ids[i])));
+        cnt_pts_id.push_back(
+                                make_pair(track_cnt[i], // 每个特征点当前被追踪到的次数
+                                        make_pair(forw_pts[i],    // 当前帧特征点的像素坐标
+                                                        ids[i])));      // 特征点的ID
     // 利用光流特点，追踪多的稳定性好，排前面
     sort(cnt_pts_id.begin(), cnt_pts_id.end(), [](const pair<int, pair<cv::Point2f, int>> &a, const pair<int, pair<cv::Point2f, int>> &b)
          {
+            // 被追踪到的次数越多，就排前面，由大到小的排序方法
             return a.first > b.first;
          });
 
@@ -159,11 +163,13 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         rejectWithF();
         ROS_DEBUG("set mask begins");
         TicToc t_m;
-        setMask();
+        setMask();  // 实现特征点均匀化，每次均匀化都会被干掉一些特征点
         ROS_DEBUG("set mask costs %fms", t_m.toc());
 
         ROS_DEBUG("detect feature begins");
         TicToc t_t;
+        // 每次均匀化之后，特征点就会减少，那么需要再提取一些特征点
+        // 提取的数量 = 最大特征点数量 - 剩下的特征点数量
         int n_max_cnt = MAX_CNT - static_cast<int>(forw_pts.size());
         if (n_max_cnt > 0)
         {
@@ -175,7 +181,14 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
                 cout << "wrong size " << endl;
             // 只有发布才可以提取更多特征点，同时避免提的点进mask
             // 会不会这些点集中？会，不过没关系，他们下一次作为老将就得接受均匀化的洗礼
-            cv::goodFeaturesToTrack(forw_img, n_pts, MAX_CNT - forw_pts.size(), 0.01, MIN_DIST, mask);
+
+            // goodFeaturesToTrack()函数可以提取输入图像中像素级别的角点，支持harris角点和Shi Tomasi角点。
+            cv::goodFeaturesToTrack(forw_img, // 原始图像的灰度图
+                                    n_pts, // 提取到的角点的像素坐标
+                                    MAX_CNT - forw_pts.size(),  // 最多提取多少个坐标
+                                    0.01,   // 提取特征点的阈值，其与最好的角点的得分相乘，结果为特征点提取的分数最低值，低于这个值就不被提取
+                                    MIN_DIST,   // 返回角之间的最小欧氏距离。
+                                    mask);
         }
         else
             n_pts.clear();
@@ -195,7 +208,7 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     prev_time = cur_time;
 }
 
-/*
+/**
  * @brief 根据对极约束剔除外点
  * 
  */
@@ -340,7 +353,7 @@ void FeatureTracker::undistortedPoints()
         pts_velocity.clear();
         for (unsigned int i = 0; i < cur_un_pts.size(); i++)
         {
-            if (ids[i] != -1)
+            if (ids[i] != -1)   // 不是新提取的特征点
             {
                 std::map<int, cv::Point2f>::iterator it;
                 it = prev_un_pts_map.find(ids[i]);
@@ -355,7 +368,7 @@ void FeatureTracker::undistortedPoints()
                 else
                     pts_velocity.push_back(cv::Point2f(0, 0));
             }
-            else
+            else    // 是新提取的特征点，速度赋值为0
             {
                 pts_velocity.push_back(cv::Point2f(0, 0));
             }

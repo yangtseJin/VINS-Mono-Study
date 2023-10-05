@@ -53,8 +53,8 @@ class FeatureTracker
     forw_img;   // 均衡化之后的图像,也是当前图像
     vector<cv::Point2f> n_pts;
     vector<cv::Point2f> prev_pts,
-    cur_pts,
-    forw_pts;   // 当前帧的特征点信息，使用前要clear清空，不然会保存上一帧的特征点
+                        cur_pts,
+                        forw_pts;   // 当前帧的特征点信息，使用前要clear清空，不然会保存上一帧的特征点
     vector<cv::Point2f> prev_un_pts, cur_un_pts;
     vector<cv::Point2f> pts_velocity;
     vector<int> ids;
