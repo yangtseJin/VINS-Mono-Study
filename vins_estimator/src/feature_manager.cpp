@@ -67,10 +67,13 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
     for (auto &id_pts : image)
     {
         // 用特征点信息构造一个对象
+        // _point 每帧的特征点[x,y,z,u,v,vx,vy]和td,即IMU和cam同步时间差
         FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
 
-        int feature_id = id_pts.first;
+        // 迭代器寻找feature list中是否有这feature_id
+        int feature_id = id_pts.first;  // 特征点ID
         // 在已有的id中寻找是否是有相同的特征点
+        // 第三个参数是 Lambda表达式
         auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
                           {
             return it.feature_id == feature_id;
@@ -100,6 +103,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         if (it_per_id.start_frame <= frame_count - 2 &&
             it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1)
         {
+            // 如果满足条件，计算视差，其实是特征点在最后两帧间的距离差
             parallax_sum += compensatedParallax2(it_per_id, frame_count);
             parallax_num++;
         }

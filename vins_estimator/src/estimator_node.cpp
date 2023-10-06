@@ -66,12 +66,13 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
     double ry = imu_msg->angular_velocity.y;
     double rz = imu_msg->angular_velocity.z;
     Eigen::Vector3d angular_velocity{rx, ry, rz};
-    // 上一时刻世界坐标系下加速度值
+    // 上一时刻世界坐标系下加速度值   这里的tmp_Q即为Rwi，即上一时刻的到世界坐标系的转换矩阵
+    // 得到的是世界坐标系下，去除了重力的加速度值
     Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - estimator.g;
 
     // 中值陀螺仪的结果
     Eigen::Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - tmp_Bg;
-    // 更新姿态
+    // 更新姿态         Utility::deltaQ 将角速度转为四元数
     tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt);
     // 当前时刻世界坐标系下的加速度值
     Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - estimator.g;
@@ -105,6 +106,7 @@ void update()
 }
 
 // 获得匹配好的图像imu组
+// 将IMU和图像特征点进行对齐
 std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>>
 getMeasurements()
 {
@@ -117,6 +119,7 @@ getMeasurements()
         // imu   *******
         // image          *****
         // 这就是imu还没来
+        // 如果IMU的最后一个时间戳 <= （图像的第一个时间戳+估计的td），这时候无法对齐，因为相当于图像需要的IMU还没到来
         if (!(imu_buf.back()->header.stamp.toSec() > feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
             //ROS_WARN("wait for imu, only should happen at the beginning");
@@ -126,25 +129,33 @@ getMeasurements()
         // imu        ****
         // image    ******
         // 这种只能扔掉一些image帧
+        // 如果IMU最早的时间戳>=第一个图像的时间戳，那么第一个图像帧找不到对应的IMU数据
         if (!(imu_buf.front()->header.stamp.toSec() < feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
             ROS_WARN("throw img, only should happen at the beginning");
+            // 那么将图像pop出队列
             feature_buf.pop();
             continue;
         }
         // 此时就保证了图像前一定有imu数据
+        // imu    ********
+        // image    *   *
+        // 这时先取出第一帧图像帧
         sensor_msgs::PointCloudConstPtr img_msg = feature_buf.front();
         feature_buf.pop();
         // 一般第一帧不会严格对齐，但是后面就都会对齐，当然第一帧也不会用到
         std::vector<sensor_msgs::ImuConstPtr> IMUs;
+        // 如果IMU的Buffer中的时间戳 < (第一帧图像的时间戳 + td)
         while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator.td)
         {
+            // 那么将IMU数据取出放入临时的vector中
             IMUs.emplace_back(imu_buf.front());
             imu_buf.pop();
         }
         // 保留图像时间戳后一个imu数据，但不会从buffer中扔掉
         // imu    *   *
         // image    *
+        // 这里相当于是将图像前的最后一个IMU数据和图像后的第一个IMU数据求个中值，作为这个图像帧的时间戳
         IMUs.emplace_back(imu_buf.front());
         if (IMUs.empty())
             ROS_WARN("no imu between two image");
@@ -167,7 +178,7 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
         return;
     }
     last_imu_t = imu_msg->header.stamp.toSec();
-    // 讲一下线程锁 条件变量用法
+    // 讲一下线程锁 条件变量用法   参考 https://www.cnblogs.com/linuxAndMcu/p/14577258.html
     m_buf.lock();
     imu_buf.push(imu_msg);
     m_buf.unlock();
@@ -247,8 +258,10 @@ void process()
     {
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
         std::unique_lock<std::mutex> lk(m_buf);
+        // 详见条件变量的用法
         con.wait(lk, [&]
                  {
+            // 将IMU和图像特征点进行时间对齐（同步）
             return (measurements = getMeasurements()).size() != 0;
                  });
         lk.unlock();    // 数据buffer的锁解锁，回调可以继续塞数据了
@@ -256,6 +269,7 @@ void process()
         // 给予范围的for循环，这里就是遍历每组image imu组合
         for (auto &measurement : measurements)
         {
+            // img_msg 为 sensor_msgs::PointCloudConstPtr 类型
             auto img_msg = measurement.second;
             double dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
             // 遍历imu
@@ -263,11 +277,11 @@ void process()
             {
                 double t = imu_msg->header.stamp.toSec();
                 double img_t = img_msg->header.stamp.toSec() + estimator.td;
-                if (t <= img_t)
+                if (t <= img_t) // 这个时间戳是图像前最后一个IMU的时间戳，不需要额外的处理
                 { 
-                    if (current_time < 0)
+                    if (current_time < 0)   // current_time 初值为-1
                         current_time = t;
-                    double dt = t - current_time;
+                    double dt = t - current_time;   // 这一帧IMU的时间戳和上一帧IMU的时间戳差值
                     ROS_ASSERT(dt >= 0);
                     current_time = t;
                     dx = imu_msg->linear_acceleration.x;
@@ -276,7 +290,7 @@ void process()
                     rx = imu_msg->angular_velocity.x;
                     ry = imu_msg->angular_velocity.y;
                     rz = imu_msg->angular_velocity.z;
-                    // 时间差和imu数据送进去
+                    // 时间差和imu数据送进去,送到后端，给优化提供一个更好的初值
                     estimator.processIMU(dt, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
                     //printf("imu: dt:%f a: %f %f %f w: %f %f %f\n",dt, dx, dy, dz, rx, ry, rz);
 
@@ -337,10 +351,11 @@ void process()
             map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
+                // img_msg 为 sensor_msgs::PointCloudConstPtr 类型，其 channels[0] 为
                 int v = img_msg->channels[0].values[i] + 0.5;
                 int feature_id = v / NUM_OF_CAM;
                 int camera_id = v % NUM_OF_CAM;
-                double x = img_msg->points[i].x;    // 去畸变后归一滑像素坐标
+                double x = img_msg->points[i].x;    // 去畸变后归一化平面的坐标
                 double y = img_msg->points[i].y;
                 double z = img_msg->points[i].z;
                 double p_u = img_msg->channels[1].values[i];    // 特征点像素坐标

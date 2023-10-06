@@ -104,11 +104,13 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
     }
     // 滑窗中保留11帧，frame_count表示现在处理第几帧，一般处理到第11帧时就保持不变了
     // 由于预积分是帧间约束，因此第1个预积分量实际上是用不到的
-    if (!pre_integrations[frame_count])
+    if (!pre_integrations[frame_count])     // 如果滑窗里面有N个数据，会有一个指针指向当前滑窗的状态
+                                            // 如果滑窗填满之后，frame_count会一直指向最后一个位置
     {
         pre_integrations[frame_count] = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
     }
     // 所以只有大于0才处理
+    // 即不是第一个图像帧才处理，也就是前面提到的不处理第一个图像帧，因为第一个图像帧可能会容纳了大量的IMU数据，影响计算结果
     if (frame_count != 0)
     {
         pre_integrations[frame_count]->push_back(dt, linear_acceleration, angular_velocity);
@@ -138,11 +140,12 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
     // Step 1 将特征点信息加到f_manager这个特征点管理器中，同时进行是否关键帧的检查
-    if (f_manager.addFeatureCheckParallax(frame_count, image, td))
+    if (f_manager.addFeatureCheckParallax(frame_count, image, td))      // 如果返回值是true，说明最后一帧和新来的一帧视差大，最后一帧（即倒数第二帧）为关键帧
         // 如果上一帧是关键帧，则滑窗中最老的帧就要被移出滑窗
         marginalization_flag = MARGIN_OLD;
     else
         // 否则移除上一帧
+        // 如果视差不够大，那么倒数第二帧不是关键帧，滑窗满了就移除倒数第二帧
         marginalization_flag = MARGIN_SECOND_NEW;
 
     ROS_DEBUG("this frame is--------------------%s", marginalization_flag ? "reject" : "accept");
@@ -154,10 +157,18 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
     // all_image_frame用来做初始化相关操作，他保留滑窗起始到当前的所有帧
     // 有一些帧会因为不是KF，被MARGIN_SECOND_NEW，但是及时较新的帧被margin，他也会保留在这个容器中，因为初始化要求使用所有的帧，而非只要KF
     ImageFrame imageframe(image, header.stamp.toSec());
+    //processIMU()中提到过 tmp_pre_integration 这个量用来做初始化用的
     imageframe.pre_integration = tmp_pre_integration;
+/**
+ *  在两个图像帧之间的预积分相当于是这两个图像帧之间的一个约束
+    在滑窗时，倒数第二帧如果不是关键帧，那么会被清除掉，但是倒数第二帧和倒数第三帧之间的预积分量，要与倒数第二帧图像和新来一帧之间的预积分量要合在一起，即预积分量的合并
+    但是在初始化当中，我们并不希望合并发生，即使倒数第二帧不是关键帧KF，要被扔掉了，但是其预积分量要做保留。
+    在滑窗中可以做合并的操作，但是在初始化中仍然希望保留这一帧的信息
+*/
     // 这里就是简单的把图像和预积分绑定在一起，这里预积分就是两帧之间的，滑窗中实际上是两个KF之间的
     // 实际上是准备用来初始化的相关数据
     all_image_frame.insert(make_pair(header.stamp.toSec(), imageframe));
+    // new一下，为下一帧的预积分做准备
     tmp_pre_integration = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
 
     // 没有外参初值
