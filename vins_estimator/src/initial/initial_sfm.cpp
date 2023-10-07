@@ -24,7 +24,8 @@ void GlobalSFM::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matr
 	Vector4d triangulated_point;
 	triangulated_point =
 		      design_matrix.jacobiSvd(Eigen::ComputeFullV).matrixV().rightCols<1>();
-	// 齐次向量归一化
+    // 求解得到Pw，现在是一个4*1的向量，需要归一化
+    // 齐次向量归一化
 	point_3d(0) = triangulated_point(0) / triangulated_point(3);
 	point_3d(1) = triangulated_point(1) / triangulated_point(3);
 	point_3d(2) = triangulated_point(2) / triangulated_point(3);
@@ -107,9 +108,9 @@ void GlobalSFM::triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Po
 									 vector<SFMFeature> &sfm_f)
 {
 	assert(frame0 != frame1);
-	for (int j = 0; j < feature_num; j++)	// feature_num是特征点总数
+	for (int j = 0; j < feature_num; j++)	// 在所有特征里面依次寻找，feature_num是特征点总数
 	{
-		if (sfm_f[j].state == true)	// 已经三角化过了
+		if (sfm_f[j].state == true)	// 如果这个特征已经三角化过了，那就跳过
 			continue;
 		bool has_0 = false, has_1 = false;
 		Vector2d point0;
@@ -117,24 +118,24 @@ void GlobalSFM::triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Po
 		// 遍历该特征点的观测，看看是不能两帧都能看到
 		for (int k = 0; k < (int)sfm_f[j].observation.size(); k++)
 		{
-			if (sfm_f[j].observation[k].first == frame0)
+			if (sfm_f[j].observation[k].first == frame0)    // 如果这个特征在frame0出现过
 			{
-				point0 = sfm_f[j].observation[k].second;	// 取出在该帧的观测
+				point0 = sfm_f[j].observation[k].second;	// 取出在该帧的观测，即把他的归一化坐标提取出来
 				has_0 = true;
 			}
-			if (sfm_f[j].observation[k].first == frame1)
+			if (sfm_f[j].observation[k].first == frame1)    //如果这个特征在frame1出现过
 			{
-				point1 = sfm_f[j].observation[k].second;
+				point1 = sfm_f[j].observation[k].second;    //把他的归一化坐标提取出来
 				has_1 = true;
 			}
 		}
-		if (has_0 && has_1)	// 如果都能被看到
+		if (has_0 && has_1)	// 如果都能被看到，即如果这两个归一化坐标都存在
 		{
 			Vector3d point_3d;
 			// 将这个特征点进行三角化
-			triangulatePoint(Pose0, Pose1, point0, point1, point_3d);
-			sfm_f[j].state = true;	// 标志位置true
-			sfm_f[j].position[0] = point_3d(0);
+			triangulatePoint(Pose0, Pose1, point0, point1, point_3d);   // 根据他们的位姿和归一化坐标，输出在参考系l下的的空间坐标
+			sfm_f[j].state = true;	// 已经完成三角化，标志位置改为true
+			sfm_f[j].position[0] = point_3d(0); // 把参考系l下的的空间坐标赋值给这个特征点的对象
 			sfm_f[j].position[1] = point_3d(1);
 			sfm_f[j].position[2] = point_3d(2);
 			//cout << "trangulated : " << frame1 << "  3d point : "  << j << "  " << point_3d.transpose() << endl;
@@ -209,6 +210,7 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	//1: trangulate between l ----- frame_num - 1
 	//2: solve pnp l + 1; trangulate l + 1 ------- frame_num - 1; 
 	// Step 1 求解枢纽帧到最后一帧之间帧的位姿及对应特征点的三角化处理
+    //TODO 为什么从l帧开始，而不是从l+1帧开始？
 	for (int i = l; i < frame_num - 1 ; i++)
 	{
 		// solve pnp
@@ -228,6 +230,7 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 
 		// triangulate point based on the solve pnp result
 		// 当前帧和最后一帧进行三角化处理
+        // 注意，三角化的前提有1个：两帧的(相对)位姿已知。这样才能把他们的共视点的三维坐标还原出来。
 		triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
 	}
 	// Step 2 考虑有些特征点不能被最后一帧看到，因此，fix枢纽帧，遍历枢纽帧到最后一帧进行特征点三角化
