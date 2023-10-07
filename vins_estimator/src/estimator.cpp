@@ -180,8 +180,10 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
         {
             // 这里标定imu和相机的旋转外参的初值
             // 因为预积分是相邻帧的约束，因为这里得到的图像关联也是相邻的
+            // 得到两帧之间归一化特征点
             vector<pair<Vector3d, Vector3d>> corres = f_manager.getCorresponding(frame_count - 1, frame_count);
             Matrix3d calib_ric;
+            // 标定从camera到IMU之间的旋转矩阵
             if (initial_ex_rotation.CalibrationExRotation(corres, pre_integrations[frame_count]->delta_q, calib_ric))
             {
                 ROS_WARN("initial extrinsic rotation calib success");
@@ -203,6 +205,8 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
             // Step 3： VIO初始化
             if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
             {
+                // VIO初始化，将滑窗中的P V Q恢复到第0帧并且和重力对齐
+                // 通过视觉SLAM的方式，将这些帧的位姿和3D点求解出来
                result = initialStructure();
                initial_timestamp = header.stamp.toSec();
             }
@@ -272,6 +276,7 @@ bool Estimator::initialStructure()
 {
     TicToc t_sfm;
     // Step 1 check imu observibility
+    // 希望得到足够的激励
     {
         map<double, ImageFrame>::iterator frame_it;
         Vector3d sum_g;
@@ -329,6 +334,7 @@ bool Estimator::initialStructure()
     Matrix3d relative_R;
     Vector3d relative_T;
     int l;
+    // 找枢纽帧l，以及求解最后一帧和枢纽帧之间的R和T
     if (!relativePose(relative_R, relative_T, l))
     {
         ROS_INFO("Not enough features or parallax; Move device around");

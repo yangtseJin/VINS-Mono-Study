@@ -30,13 +30,13 @@ class FeaturePerFrame
         cur_td = td;
     }
     double cur_td;
-    Vector3d point;
-    Vector2d uv;
-    Vector2d velocity;
-    double z;
-    bool is_used;
-    double parallax;
-    MatrixXd A;
+    Vector3d point;     // 去畸变后的归一化相机坐标
+    Vector2d uv;        // 像素坐标
+    Vector2d velocity;      // 特征点速度
+    double z;           // 特征点的深度
+    bool is_used;       // 是否被使用了
+    double parallax;    // 视差
+    MatrixXd A;         // 变换矩阵
     VectorXd b;
     double dep_gradient;
 };

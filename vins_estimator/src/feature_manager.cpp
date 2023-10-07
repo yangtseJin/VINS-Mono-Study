@@ -164,6 +164,7 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
             int idx_l = frame_count_l - it.start_frame;
             int idx_r = frame_count_r - it.start_frame;
 
+            // frame_count_l这一帧图像中特征点ID为idx_l的三维点信息
             a = it.feature_per_frame[idx_l].point;
 
             b = it.feature_per_frame[idx_r].point;
@@ -256,23 +257,29 @@ VectorXd FeatureManager::getDepthVector()
  * @param[in] tic 
  * @param[in] ric 
  */
+// 对特征点进行三角化求深度（SVD分解）
 void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
 {
     // 遍历每一个特征点
     for (auto &it_per_id : feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
+        // 如果该特征出现的次数<2  或 该特征被首次观测到时的对应帧在滑窗中是最后一帧了，就无法三角化了
         if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
             continue;
 
+        // 如果该特征点已经有深度了
         if (it_per_id.estimated_depth > 0)  // 代表已经三角化过了
             continue;
         int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
 
         ROS_ASSERT(NUM_OF_CAM == 1);
+        // 两帧三角化时即可得到4个等式
         Eigen::MatrixXd svd_A(2 * it_per_id.feature_per_frame.size(), 4);
         int svd_idx = 0;
 
+        // R0 t0为第i帧相机坐标系到世界坐标系的变换矩阵
+        // T_cw : [R|t]_3*4
         Eigen::Matrix<double, 3, 4> P0;
         // Twi -> Twc,第一个观察到这个特征点的KF的位姿
         Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
@@ -284,6 +291,7 @@ void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
         {
             imu_j++;
             // 得到该KF的相机坐标系位姿
+            // R t为第j帧相机坐标系到第i帧相机坐标系的变换矩阵，P为i到j的变换矩阵
             Eigen::Vector3d t1 = Ps[imu_j] + Rs[imu_j] * tic[0];
             Eigen::Matrix3d R1 = Rs[imu_j] * ric[0];
             // T_w_cj -> T_c0_cj
@@ -301,6 +309,7 @@ void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
             if (imu_i == imu_j)
                 continue;
         }
+        // 对A的SVD分解得到其最小奇异值对应的单位奇异向量(x,y,z,w)，深度为z/w
         ROS_ASSERT(svd_idx == svd_A.rows());
         Eigen::Vector4d svd_V = Eigen::JacobiSVD<Eigen::MatrixXd>(svd_A, Eigen::ComputeThinV).matrixV().rightCols<1>();
         // 求解齐次坐标下的深度
