@@ -203,34 +203,35 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
             bool result = false;
             // 要有可信的外参值，同时距离上次初始化不成功至少相邻0.1s
             // Step 3： VIO初始化
+            // 确保有足够的frame参与初始化，有外参，且当前帧时间戳大于初始化时间戳+0.1秒
             if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
             {
                 // VIO初始化，将滑窗中的P V Q恢复到第0帧并且和重力对齐
                 // 通过视觉SLAM的方式，将这些帧的位姿和3D点求解出来
-               result = initialStructure();
-               initial_timestamp = header.stamp.toSec();
+               result = initialStructure();     // 执行视觉惯性联合初始化
+               initial_timestamp = header.stamp.toSec();    // 更新初始化时间戳
             }
-            if(result)
+            if(result)      // 初始化成功则进行一次非线性优化
             {
-                solver_flag = NON_LINEAR;
+                solver_flag = NON_LINEAR;   // 进行非线性优化
                 // Step 4： 非线性优化求解VIO
-                solveOdometry();
+                solveOdometry();    // 执行非线性优化具体函数solveOdometry()
                 // Step 5： 滑动窗口
                 slideWindow();
                 // Step 6： 移除无效地图点
                 f_manager.removeFailures(); // 移除无效地图点
                 ROS_INFO("Initialization finish!");
-                last_R = Rs[WINDOW_SIZE];   // 滑窗里最新的位姿
+                last_R = Rs[WINDOW_SIZE];   // 滑窗里最新的位姿 ，即得到当前帧与第一帧的位姿
                 last_P = Ps[WINDOW_SIZE];
                 last_R0 = Rs[0];    // 滑窗里最老的位姿
                 last_P0 = Ps[0];
                 
             }
             else
-                slideWindow();
+                slideWindow();  // 不成功则进行滑窗操作
         }
         else
-            frame_count++;
+            frame_count++;  // 图像帧数量+1
     }
     else
     {
@@ -274,32 +275,38 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
  */
 bool Estimator::initialStructure()
 {
+    // 这一部分的思想就是通过计算滑窗内所有帧的线加速度的标准差，判断IMU是否有充分运动激励，以判断是否进行初始化。
+    // 一上来就出现all_image_frame这个数据结构，它包含了滑窗内所有帧的视觉和IMU信息，它是一个hash，以时间戳为索引。
     TicToc t_sfm;
     // Step 1 check imu observibility
-    // 希望得到足够的激励
+    // 希望IMU得到足够的激励
     {
         map<double, ImageFrame>::iterator frame_it;
         Vector3d sum_g;
+        // (1)第一次循环，求出滑窗内的平均线加速度
         // 从第二帧开始检查imu
         for (frame_it = all_image_frame.begin(), frame_it++; frame_it != all_image_frame.end(); frame_it++)
         {
-            double dt = frame_it->second.pre_integration->sum_dt;
+            //  //all_image_frame这个数据结构，它包含了滑窗内所有帧的视觉和IMU信息
+            double dt = frame_it->second.pre_integration->sum_dt;   // time for bk to bk+1
             Vector3d tmp_g = frame_it->second.pre_integration->delta_v / dt;
             // 累加每一帧带重力加速度的deltav
             sum_g += tmp_g;
         }
         Vector3d aver_g;
+        // 总帧数减1，因为all_image_frame第一帧不算
         aver_g = sum_g * 1.0 / ((int)all_image_frame.size() - 1);
         double var = 0;
+        // (2)第二次循环，求出滑窗内的线加速度的标准差
         for (frame_it = all_image_frame.begin(), frame_it++; frame_it != all_image_frame.end(); frame_it++)
         {
             double dt = frame_it->second.pre_integration->sum_dt;
             Vector3d tmp_g = frame_it->second.pre_integration->delta_v / dt;
-            // 求方差
+            // 计算加速度的方差
             var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
             //cout << "frame g " << tmp_g.transpose() << endl;
         }
-        // 得到的标准差
+        // 得到加速度的标准差
         var = sqrt(var / ((int)all_image_frame.size() - 1));
         //ROS_WARN("IMU variation %f!", var);
         // 实际上检查结果并没有用
@@ -307,45 +314,71 @@ bool Estimator::initialStructure()
         {
             ROS_INFO("IMU excitation not enouth!");
             //return false;
+            // 这里不能简单的返回false,这样会导致sfm中pnp无解,如果要返回false就需要改滑窗的特征点管理
+            /**
+                一步我们求解IMU在一段时间里加速度的方差，
+                （1）如果方差较大，说明IMU得到了充分的激励（动的挺多）。
+                （2）方差较少可能IMU没怎么动。
+                作者的代码里最终并没有区分两种情况，只是写在了这里。可能作者经过实验发现这个影响较小，所以作者注释掉了这段代码
+            */
         }
     }
     // Step 2 global sfm
     // 做一个纯视觉slam
-    Quaterniond Q[frame_count + 1];
+    // 将f_manager中的所有feature在所有帧的归一化坐标保存到vector sfm_f中(辅助)
+    // 为什么容量是frame_count + 1？因为滑窗的容量是10，再加上当前最新帧，所以需要储存11帧的值！
+    Quaterniond Q[frame_count + 1];     // Twc由相机系到世界系的变换,也就是在世界系(参考关键帧)下的位姿
     Vector3d T[frame_count + 1];
-    map<int, Vector3d> sfm_tracked_points;
+    map<int, Vector3d> sfm_tracked_points;      // feature_id + 三角化且优化后的点坐标
     vector<SFMFeature> sfm_f;   // 保存每个特征点的信息
     // 遍历所有的特征点
-    for (auto &it_per_id : f_manager.feature)
+    for (auto &it_per_id : f_manager.feature)   // 对于滑窗中出现的所有特征点
     {
+        // 从start_frame开始帧编号
         int imu_j = it_per_id.start_frame - 1;  // 这个跟imu无关，就是存储观测特征点的帧的索引
-        SFMFeature tmp_feature; // 用来后续做sfm
-        tmp_feature.state = false;
-        tmp_feature.id = it_per_id.feature_id;
-        for (auto &it_per_frame : it_per_id.feature_per_frame)
+        SFMFeature tmp_feature;     // 用来后续做sfm
+        tmp_feature.state = false;  // 状态（是否被三角化）
+        tmp_feature.id = it_per_id.feature_id;  // 特征点id
+        for (auto &it_per_frame : it_per_id.feature_per_frame)  // 对于当前特征点 在每一帧的坐标
         {
-            imu_j++;
-            Vector3d pts_j = it_per_frame.point;
+            imu_j++;    // 帧编号+1
+            Vector3d pts_j = it_per_frame.point;    // 当前特征在编号为imu_j++的帧的归一化坐标
             // 索引以及各自坐标系下的坐标
+            // 把当前特征在当前帧的坐标和当前帧的编号配上对
+            // 该feature在哪几帧中被观测到,同时记录其在滑动窗口中的位置
             tmp_feature.observation.push_back(make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
-        }
-        sfm_f.push_back(tmp_feature);
-    } 
+        }   // tmp_feature.observation里面存放着的一直是同一个特征，每一个pair是这个特征在 不同帧号 中的 归一化坐标
+        sfm_f.push_back(tmp_feature);   // sfm_f里面存放着是不同特征
+       /**
+        在这里，为什么要多此一举构造一个sfm_f而不是直接使用f_manager呢？
+        我的理解，是因为f_manager的信息量大于SfM所需的信息量(f_manager包含了大量的像素信息)，
+        而且不同的数据结构是为了不同的业务服务的，
+        所以在这里作者专门为SfM设计了一个全新的数据结构sfm_f，专业化服务。
+       */
+    }
+    // 在滑窗(0-9)中找到第一个满足要求的帧(第l帧)，它与最新一帧(frame_count=10)有足够的共视点和平行度，并求出这两帧之间的相对位置变化关系；
     Matrix3d relative_R;
-    Vector3d relative_T;
-    int l;
+    Vector3d relative_T;    // 当前帧到共视帧
+    int l;   // 滑窗中满足与最新帧视差关系的那一帧的帧号
     // 找枢纽帧l，以及求解最后一帧和枢纽帧之间的R和T
-    if (!relativePose(relative_R, relative_T, l))
+    // 计算滑窗内的每一帧(0-9)与最新一帧(10)之间的视差，直到找出第一个满足要求的帧，作为我们的第l帧；
+    if (!relativePose(relative_R, relative_T, l))   // 如果没有满足要求的帧，整个初始化initialStructure()失败。
     {
         ROS_INFO("Not enough features or parallax; Move device around");
         return false;
     }
     GlobalSFM sfm;
+    // construct()：对窗口中每个图像帧求解sfm问题，
+    // 得到所有图像帧相对于参考帧l的姿态四元数Q、平移向量T和特征点坐标sfm_tracked_points （核心）
+    // 看一下*construct()*里面干了什么。见initial/initial_sfm.cpp文件
     // 进行sfm的求解
+    // 对窗口中每个图像帧求解sfm问题
+    // 得到所有图像帧相对于参考帧的旋转四元数Q、平移向量T和特征点坐标(核心！)
     if(!sfm.construct(frame_count + 1, Q, T, l,
               relative_R, relative_T,
               sfm_f, sfm_tracked_points))
     {
+        // 这说明了在初始化后期的第一次slidingwindow() marg掉的是old帧。
         ROS_DEBUG("global SFM failed!");
         marginalization_flag = MARGIN_OLD;
         return false;
@@ -541,11 +574,17 @@ bool Estimator::visualInitialAlign()
 
 bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
 {
+    /**
+        这里的第L帧是从第一帧开始到滑动窗口中第一个满足与当前帧的平均视差足够大的帧l，
+        会作为 参考帧 到下面的全局sfm使用，得到的Rt为当前帧到第l帧的坐标系变换Rt
+    */
+    // a.计算滑窗内的每一帧(0-9)与最新一帧(10)之间的视差，直到找出第一个满足要求的帧，作为我们的第l帧；
     // find previous frame which contians enough correspondance and parallex with newest frame
     // 优先从最前面开始
     for (int i = 0; i < WINDOW_SIZE; i++)
     {
         vector<pair<Vector3d, Vector3d>> corres;
+        // getCorresponding()的作用就是找到当前帧与最新一帧所有特征点在对应2帧下分别的归一化坐标，并配对，以供求出相对位姿时使用。
         corres = f_manager.getCorresponding(i, WINDOW_SIZE);
         // 要求共视的特征点足够多
         if (corres.size() > 20)
@@ -562,15 +601,23 @@ bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
             }
             // 计算每个特征点的平均视差
             average_parallax = 1.0 * sum_parallax / int(corres.size());
+            // b.计算l帧与最新一帧的相对位姿关系
             // 有足够的视差在通过本质矩阵恢复第i帧和最后一帧之间的 R t T_i_last
+            /*
+                solveRelativeRT()通过基础矩阵计算当前帧与第l帧之间的R和T,并判断内点数目是否足够
+                同时返回窗口最后一帧（当前帧）到第l帧（参考帧）的relative_R，relative_T
+                这个relative_R和relative_T是把最新一帧旋转到第l帧的旋转平移！
+            */
             if(average_parallax * 460 > 30 && m_estimator.solveRelativeRT(corres, relative_R, relative_T))
             {
                 l = i;
                 ROS_DEBUG("average_parallax %f choose l %d and newest frame to triangulate the whole structure", average_parallax * 460, l);
                 return true;
+                // 一旦这一帧与当前帧视差足够大了，那么就不再继续找下去了(再找只会和当前帧的视差越来越小）
             }
         }
     }
+    // c.没有满足要求的帧，整个初始化initialStructure()失败。
     return false;
 }
 

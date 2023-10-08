@@ -45,38 +45,44 @@ void GlobalSFM::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matr
 bool GlobalSFM::solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,
 								vector<SFMFeature> &sfm_f)
 {
+    // a．第一次筛选：把滑窗的所有特征点中，那些没有3D坐标的点pass掉。
 	vector<cv::Point2f> pts_2_vector;
 	vector<cv::Point3f> pts_3_vector;
-	for (int j = 0; j < feature_num; j++)
+	for (int j = 0; j < feature_num; j++)   // 其中的feature_num = sfm_f.size()
 	{
-		if (sfm_f[j].state != true) // 是false就是没有被三角化，pnp是3d到2d求解，因此需要3d点
+        //要把待求帧i上所有特征点的归一化坐标和3D坐标(l系上)都找出来
+		if (sfm_f[j].state != true) // 是false就是没有被三角化，pnp是3d到2d求解，因此需要3d点， 即这个特征点没有被三角化为空间点，跳过这个点的PnP
 			continue;
+        // b．因为是对当前帧和上一帧进行PnP，所以这些有3D坐标的特征点，不仅得在当前帧被观测到，还得在上一帧被观测到。
 		Vector2d point2d;
-		for (int k = 0; k < (int)sfm_f[j].observation.size(); k++)
+		for (int k = 0; k < (int)sfm_f[j].observation.size(); k++)  // 依次遍历特征j在每一帧中的归一化坐标
 		{
-			if (sfm_f[j].observation[k].first == i)
+			if (sfm_f[j].observation[k].first == i)     // 如果该特征在帧i上出现过
 			{
 				Vector2d img_pts = sfm_f[j].observation[k].second;
 				cv::Point2f pts_2(img_pts(0), img_pts(1));
-				pts_2_vector.push_back(pts_2);
+				pts_2_vector.push_back(pts_2);      // 把在待求帧i上出现过的特征的归一化坐标放到容器中
 				cv::Point3f pts_3(sfm_f[j].position[0], sfm_f[j].position[1], sfm_f[j].position[2]);
-				pts_3_vector.push_back(pts_3);
-				break;
+				pts_3_vector.push_back(pts_3);      // 把在待求帧i上出现过的特征在参考系l的空间坐标放到容器中
+				break;      // 因为一个特征在帧i上只会出现一次，一旦找到了就没有必要再继续找了
 			}
 		}
 	}
+    // c.如果这些有3D坐标的特征点，并且在当前帧和上一帧都出现了，数量却少于15，那么整个初始化全部失败。因为它的是层层往上传递。
 	if (int(pts_2_vector.size()) < 15)
 	{
 		printf("unstable features tracking, please slowly move you device!\n");
 		if (int(pts_2_vector.size()) < 10)
 			return false;
 	}
-	cv::Mat r, rvec, t, D, tmp_r;
-	cv::eigen2cv(R_initial, tmp_r);
+    // d．套用openCV的公式，进行PnP求解。
+	cv::Mat r, rvec, t, D, tmp_r;   // 畸变系数D设为空的
+	cv::eigen2cv(R_initial, tmp_r);     // 转换成solvePnP能处理的格式
 	cv::Rodrigues(tmp_r, rvec);
 	cv::eigen2cv(P_initial, t);
-	cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
+	cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);  // 由于是在归一化平面下，内参矩阵K设为单位阵
 	bool pnp_succ;
+    // 得到了第l帧到第i帧的旋转平移
 	pnp_succ = cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, 1);
 	if(!pnp_succ)
 	{
@@ -85,10 +91,10 @@ bool GlobalSFM::solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,
 	cv::Rodrigues(rvec, r);
 	//cout << "r " << endl << r << endl;
 	MatrixXd R_pnp;
-	cv::cv2eigen(r, R_pnp);
+	cv::cv2eigen(r, R_pnp);     // 转换成原有格式
 	MatrixXd T_pnp;
 	cv::cv2eigen(t, T_pnp);
-	R_initial = R_pnp;
+	R_initial = R_pnp;      // 覆盖原先的旋转平移
 	P_initial = T_pnp;
 	return true;
 
@@ -171,18 +177,22 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	//cout << "set 0 and " << l << " as known " << endl;
 	// have relative_r relative_t
 	// intial two view
-	// 枢纽帧设置为单位帧，也可以理解为世界系原点
-	q[l].w() = 1;
+    // (1)把第l帧作为参考坐标系，获得最新一帧在参考坐标系下的位姿
+	// 枢纽帧设置为单位阵，也可以理解为世界系原点
+	q[l].w() = 1;   // 参考帧的四元数，平移为1和0
 	q[l].x() = 0;
 	q[l].y() = 0;
 	q[l].z() = 0;
+    // 这里把第l帧看作参考坐标系，根据当前帧到第l帧的relative_R，relative_T，
+    // 得到当前帧在参考坐标系下的位姿，之后的pose[i]表示第l帧到第i帧的变换矩阵[R|T]
 	T[l].setZero();
 	// 求得最后一帧的位姿
-	q[frame_num - 1] = q[l] * Quaterniond(relative_R);
+	q[frame_num - 1] = q[l] * Quaterniond(relative_R);  // frame_num-1表示当前帧* relative c0_->ck
 	T[frame_num - 1] = relative_T;
 	//cout << "init q_l " << q[l].w() << " " << q[l].vec().transpose() << endl;
 	//cout << "init t_l " << T[l].transpose() << endl;
 
+    // (2)构造容器，存储滑窗内 第l帧 相对于 其它帧 和 最新一帧 的位姿
 	// 由于纯视觉slam处理都是Tcw,因此下面把Twc转成Tcw
 	//rotate to cam frame
 	Matrix3d c_Rotation[frame_num];
@@ -191,10 +201,17 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	double c_rotation[frame_num][4];
 	double c_translation[frame_num][3];
 	Eigen::Matrix<double, 3, 4> Pose[frame_num];
+    /*
+        注意，这些容器存储的都是相对运动，大写的容器对应的是l帧旋转到各个帧。
+        小写的容器是用于全局BA时使用的，也同样是l帧旋转到各个帧。之所以在这两个地方要保存这种相反的旋转，是因为三角化求深度的时候需要这个相反旋转的矩阵！
+        为了表示区别，称这两类容器叫 坐标系变换矩阵，而不能叫 位姿 ！
+     */
 
+    // (3)对于第l帧和最新一帧，它们的相对运动是已知的，可以直接放入容器
 	// 将枢纽帧和最后一帧Twc转成Tcw，包括四元数，旋转矩阵，平移向量和增广矩阵
+    // 从l帧旋转到各个帧的旋转平移
 	c_Quat[l] = q[l].inverse();
-	c_Rotation[l] = c_Quat[l].toRotationMatrix();
+	c_Rotation[l] = c_Quat[l].toRotationMatrix();   // L=RA+T ，则有 A = R^{-1}L - R^{-1}T
 	c_Translation[l] = -1 * (c_Rotation[l] * T[l]);
 	Pose[l].block<3, 3>(0, 0) = c_Rotation[l];
 	Pose[l].block<3, 1>(0, 3) = c_Translation[l];
@@ -211,14 +228,17 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	//2: solve pnp l + 1; trangulate l + 1 ------- frame_num - 1; 
 	// Step 1 求解枢纽帧到最后一帧之间帧的位姿及对应特征点的三角化处理
     //TODO 为什么从l帧开始，而不是从l+1帧开始？
+    // 对于在sliding window里在第l帧之后的每一帧，分别都和前一帧用PnP求它的位姿，得到位姿后再和最新一帧三角化得到它们共视点的3D坐标
 	for (int i = l; i < frame_num - 1 ; i++)
 	{
 		// solve pnp
 		if (i > l)
 		{
 			// 这是依次求解，因此上一帧的位姿是已知量
+            // 由于是迭代求解，要求解的位姿初始值我们不知道，那么迭代初始值就干脆用上一帧的位姿，这是能找到的比较接近这一帧的位姿
 			Matrix3d R_initial = c_Rotation[i - 1];
 			Vector3d P_initial = c_Translation[i - 1];
+            // 已知第i帧上出现的一些特征点的l系上空间坐标，通过上一帧的旋转平移得到下一帧的旋转平移
 			if(!solveFrameByPnP(R_initial, P_initial, i, sfm_f))
 				return false;
 			c_Rotation[i] = R_initial;
@@ -231,6 +251,7 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 		// triangulate point based on the solve pnp result
 		// 当前帧和最后一帧进行三角化处理
         // 注意，三角化的前提有1个：两帧的(相对)位姿已知。这样才能把他们的共视点的三维坐标还原出来。
+        // 头2个和中间2个参数相互换位置没有影响
 		triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
 	}
 	// Step 2 考虑有些特征点不能被最后一帧看到，因此，fix枢纽帧，遍历枢纽帧到最后一帧进行特征点三角化
