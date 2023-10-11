@@ -165,7 +165,7 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
             int idx_r = frame_count_r - it.start_frame;
 
             // frame_count_l这一帧图像中特征点ID为idx_l的三维点信息
-            a = it.feature_per_frame[idx_l].point;
+            a = it.feature_per_frame[idx_l].point;  // 去畸变后的归一化相机坐标
 
             b = it.feature_per_frame[idx_r].point;
             
