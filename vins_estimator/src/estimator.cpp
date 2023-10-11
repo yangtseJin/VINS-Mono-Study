@@ -213,6 +213,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
             }
             if(result)      // 初始化成功则进行一次非线性优化
             {
+                // 先进行一次滑动窗口非线性优化，得到当前帧与第一帧的位姿
                 solver_flag = NON_LINEAR;   // 进行非线性优化
                 // Step 4： 非线性优化求解VIO
                 solveOdometry();    // 执行非线性优化具体函数solveOdometry()
@@ -621,6 +622,7 @@ bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
     return false;
 }
 
+// 三角化求解所有特征点的深度，并进行非线性优化
 void Estimator::solveOdometry()
 {
     // 保证滑窗中帧数满了
@@ -633,6 +635,7 @@ void Estimator::solveOdometry()
         // 先把应该三角化但是没有三角化的特征点三角化
         f_manager.triangulate(Ps, tic, ric);
         ROS_DEBUG("triangulation costs %f", t_tri.toc());
+        // 非线性优化
         optimization();
     }
 }

@@ -216,14 +216,16 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
 // 不是每一帧都做，只给要发送的帧做，主要为了节约时间，还要保证给后端发送的数据的质量
 void FeatureTracker::rejectWithF()
 {
-    // 当前被追踪到的光流至少8个点
+    // 八点法计算基础矩阵F,当前被追踪到的光流至少8个点
     if (forw_pts.size() >= 8)
     {
         ROS_DEBUG("FM ransac begins");
         TicToc t_f;
-        vector<cv::Point2f> un_cur_pts(cur_pts.size()), un_forw_pts(forw_pts.size());
+        vector<cv::Point2f> un_cur_pts(cur_pts.size()),     // 存储特征点在前一帧中的去畸变坐标
+                            un_forw_pts(forw_pts.size());   // 存储特征点在当前帧中的去畸变坐标
         for (unsigned int i = 0; i < cur_pts.size(); i++)
         {
+            // 计算特征点在前一帧中的去畸变坐标
             Eigen::Vector3d tmp_p;
             // 得到相机归一化坐标系的值
             // 对上一帧图像特征点的处理
