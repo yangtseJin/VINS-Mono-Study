@@ -15,7 +15,7 @@ void ResidualBlockInfo::Evaluate()
     for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
     {
         jacobians[i].resize(cost_function->num_residuals(), block_sizes[i]);    // 雅克比矩阵大小 残差×变量
-        raw_jacobians[i] = jacobians[i].data();
+        raw_jacobians[i] = jacobians[i].data();  // jacobians[i].data()是数据的指针
         //dim += block_sizes[i] == 7 ? 6 : block_sizes[i];
     }
     // 调用各自重载的接口计算残差和雅克比
@@ -100,21 +100,28 @@ void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block
 {
     factors.emplace_back(residual_block_info);  // 残差块收集起来
 
+    // 获得参数块的起始地址
     std::vector<double *> &parameter_blocks = residual_block_info->parameter_blocks;    // 这个是和该约束相关的参数块
+    // 获得参数块的大小
+    // 其中parameter_block_sizes每个优化变量块的变量大小，以IMU残差为例，为[7,9,7,9]
     std::vector<int> parameter_block_sizes = residual_block_info->cost_function->parameter_block_sizes();   // 各个参数块的大小
 
     for (int i = 0; i < static_cast<int>(residual_block_info->parameter_blocks.size()); i++)
     {
         double *addr = parameter_blocks[i];
         int size = parameter_block_sizes[i];
-        // 这里是个map，避免重复添加
+        // 这里是个 unordered map，即哈希表，避免重复添加
+        // 在计算约束时，同一个参数块被执行了好几次，但是在内存中实际上只有一块存储空间
+        // parameter_block_size 的key为内存的起始地址，而value为块的大小
+        // 这里的global size为变量实际存储时的大小，local size为实际计算时用的空间大小，
+        // 比如位姿的global size为7，local size为6，因为旋转在存储时用的时四元数，为4维，而在计算雅可比时用的是旋转向量，为3维
         parameter_block_size[reinterpret_cast<long>(addr)] = size;  // 地址->global size
     }
     // 待边缘化的参数块
     for (int i = 0; i < static_cast<int>(residual_block_info->drop_set.size()); i++)
     {
         double *addr = parameter_blocks[residual_block_info->drop_set[i]];
-        // 先准备好待边缘化的参数块的map
+        // 先准备好待边缘化的参数块的 unordered map
         parameter_block_idx[reinterpret_cast<long>(addr)] = 0;
     }
 }
@@ -125,16 +132,18 @@ void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block
  */
 void MarginalizationInfo::preMarginalize()
 {
+    // factors.emplace_back(residual_block_info) 之前收集起来的残差块
     for (auto it : factors)
     {
+        // 注意：这里调用的Evaluate()函数是ResidualBlockInfo类中的同名函数，而不是CostFunction中的Evaluate()函数
         it->Evaluate(); // 调用这个接口计算各个残差块的残差和雅克比矩阵
 
         std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();  // 得到每个残差块的参数块大小
         for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
         {
             long addr = reinterpret_cast<long>(it->parameter_blocks[i]);    // 得到该参数块的地址
-            int size = block_sizes[i];  // 参数块大小
-            // 把各个参数块都备份起来，使用map避免重复参数块，之所以备份，是为了后面的状态保留
+            int size = block_sizes[i];  // 参数块大小，位姿是7，速度的bias是9
+            // 把各个参数块都备份起来，使用unordered map避免重复参数块，之所以备份，是为了后面的状态保留
             if (parameter_block_data.find(addr) == parameter_block_data.end())
             {
                 double *data = new double[size];
@@ -198,7 +207,8 @@ void* ThreadsConstructA(void* threadsstruct)
                 }
             }
             // 然后构建g矩阵
-            // ? : 为什么不是-JTb
+            //TODO ? : 为什么不是-JTb
+            // 这里没加负号，后面分解J和b时也没加负号，所以不影响
             p->b.segment(idx_i, size_i) += jacobian_i.transpose() * it->residuals;
         }
     }
@@ -217,7 +227,7 @@ void MarginalizationInfo::marginalize()
     for (auto &it : parameter_block_idx)
     {
         it.second = pos;    // 这就是在所有参数中排序的idx，待边缘化的排在前面
-        pos += localSize(parameter_block_size[it.first]);   // 因为要进行求导，因此大小时local size，具体一点就是使用李代数
+        pos += localSize(parameter_block_size[it.first]);   // 因为要进行求导，因此大小是local size，具体一点就是使用李代数
     }
 
     m = pos;    // 总共待边缘化的参数块总大小（不是个数）

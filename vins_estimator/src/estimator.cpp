@@ -1001,7 +1001,7 @@ void Estimator::optimization()
     options.linear_solver_type = ceres::DENSE_SCHUR;
     //options.num_threads = 2;
     options.trust_region_strategy_type = ceres::DOGLEG;
-    options.max_num_iterations = NUM_ITERATIONS;
+    options.max_num_iterations = NUM_ITERATIONS;    // ceres迭代优化次数
     //options.use_explicit_schur_complement = true;
     //options.minimizer_progress_to_stdout = true;
     //options.use_nonmonotonic_steps = true;
@@ -1032,6 +1032,7 @@ void Estimator::optimization()
         // 2、找到构造高斯牛顿下降时跟这些待边缘化相关的参数块有关的残差约束，那就是预积分约束，重投影约束，以及上一次边缘化约束
         // 3、这些约束连接的参数块中，不需要被边缘化的参数块，就是被提供先验约束的部分，也就是滑窗中剩下的位姿和速度零偏
 
+        //添加边缘化残差
         // 上一次的边缘化结果
         if (last_marginalization_info)
         {
@@ -1055,13 +1056,19 @@ void Estimator::optimization()
         }
         // 只有第1个预积分和待边缘化参数块相连
         {
+            // 如果预积分累计积分的时间跨度超过了10，那么置信度就比较低，不适合拿来形成约束
             if (pre_integrations[1]->sum_dt < 10.0)
             {
                 // 跟构建ceres约束问题一样，这里也需要得到残差和雅克比
+                // 这里的 factor 和预积分时的 factor 是一样的，其中会重载 Evaluate 函数，要给出雅可比和残差的计算方式
                 IMUFactor* imu_factor = new IMUFactor(pre_integrations[1]);
-                ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(imu_factor, NULL,
-                                                                           vector<double *>{para_Pose[0], para_SpeedBias[0], para_Pose[1], para_SpeedBias[1]},
-                                                                           vector<int>{0, 1});  // 这里就是第0和1个参数块是需要被边缘化的
+                ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(imu_factor, // 代价函数，就是前面定义的 factor
+                                                                               NULL,    // 核函数，关于IMU的不需要核函数
+                                                                           vector<double *>{para_Pose[0],   // 第0帧的位姿，size为7
+                                                                                                            para_SpeedBias[0],  // 第0帧的速度bias
+                                                                                                            para_Pose[1],   // 第1帧的位姿
+                                                                                                            para_SpeedBias[1]}, // 第1帧的速度bias
+                                                                           vector<int>{0, 1});  // 这里就是第0和1个参数块是需要被边缘化的，即para_Pose[0]和para_SpeedBias[0]
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
         }
@@ -1091,6 +1098,7 @@ void Estimator::optimization()
 
                     Vector3d pts_j = it_per_frame.point;
                     // 根据是否约束延时确定残差阵
+                    // 这里添加残差块和前面视觉重投影是一样的
                     if (ESTIMATE_TD)
                     {
                         ProjectionTdFactor *f_td = new ProjectionTdFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
@@ -1104,9 +1112,12 @@ void Estimator::optimization()
                     else
                     {
                         ProjectionFactor *f = new ProjectionFactor(pts_i, pts_j);
-                        ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
-                                                                                       vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index]},
-                                                                                       vector<int>{0, 3});  // 这里第0帧和地图点被margin
+                        ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,    // 加核函数，避免误匹配
+                                                                                       vector<double *>{para_Pose[imu_i],   // 第i帧位姿
+                                                                                                                        para_Pose[imu_j],   // 第j帧位姿
+                                                                                                                        para_Ex_Pose[0],    // 外参
+                                                                                                                        para_Feature[feature_index]},   // 特征点的逆深度
+                                                                                       vector<int>{0, 3});  // 这里第0帧和地图点被margin，即para_Pose[imu_i]和para_Feature[feature_index]
                         marginalization_info->addResidualBlockInfo(residual_block_info);
                     }
                 }
