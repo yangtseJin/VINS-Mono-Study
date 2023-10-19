@@ -66,19 +66,47 @@ class MarginalizationInfo
     std::vector<ResidualBlockInfo *> factors;
     // m为要marg掉的变量个数，也就是parameter_block_idx的总localSize，以double为单位，VBias为9，PQ为6，
     // n为要保留下的优化变量的变量个数，n=localSize(parameter_block_size) – m
-    int m, n;
+    int m, n;   // m为要边缘化的变量个数，n为要保留下来的变量个数
+
+
+    /**
+     * 这里有三个unordered_map相关的变量分别是：
+        - parameter_block_size、
+        - parameter_block_idx、
+        - parameter_block_data，
+        他们的key都同一是long类型的内存地址，
+        而value分别是，(1)各个优化变量的长度，
+                     (2)各个优化变量的id
+                     (3)各个优化变量对应的double指针类型的数据。
+     */
     // <优化变量内存地址，localSize>
     std::unordered_map<long, int> parameter_block_size; //global size   // 地址->global size
+    // 留下来的边缘化后的参数块总大小
     int sum_block_size;
     // <待marg的优化变量内存地址，在parameter_block_size中的id,以double为单位>
     std::unordered_map<long, int> parameter_block_idx; //local size // 地址->参数排列的顺序idx
     // <优化变量内存地址，数据>
     std::unordered_map<long, double *> parameter_block_data;    // 地址->参数块实际内容的地址
 
-    std::vector<int> keep_block_size; //global size
-    std::vector<int> keep_block_idx;  //local size
+    /**
+     * 上面的三个unordered_map对应的有三个vector相关的变量分别是：
+        - keep_block_size、
+        - keep_block_idx、
+        - keep_block_data，
+        他们是进行边缘化之后保留下来的     (1)各个优化变量的长度，
+                                     (2)各个优化变量的id
+                                     (3)各个优化变量对应的double指针类型的数据
+     */
+    std::vector<int> keep_block_size; //global size ，global size为变量实际存储时的大小
+    std::vector<int> keep_block_idx;  //local size ，local size为实际计算时用的空间大小 ，比如位姿的global size为7，local size为6
     std::vector<double *> keep_block_data;
 
+    /**
+     * - linearized_jacobians、
+       - linearized_residuals，
+        分别指的是边缘化之后从信息矩阵恢复出来的    (1)雅克比矩阵
+                                            (2)残差向量
+     */
     Eigen::MatrixXd linearized_jacobians;
     Eigen::VectorXd linearized_residuals;
     const double eps = 1e-8;

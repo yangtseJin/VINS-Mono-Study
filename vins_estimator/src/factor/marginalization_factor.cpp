@@ -133,6 +133,7 @@ void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block
 void MarginalizationInfo::preMarginalize()
 {
     // factors.emplace_back(residual_block_info) 之前收集起来的残差块
+    // 在前面的addResidualBlockInfo中会将不同的残差块加入到factor中
     for (auto it : factors)
     {
         // 注意：这里调用的Evaluate()函数是ResidualBlockInfo类中的同名函数，而不是CostFunction中的Evaluate()函数
@@ -141,14 +142,16 @@ void MarginalizationInfo::preMarginalize()
         std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();  // 得到每个残差块的参数块大小
         for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
         {
+            // 优化变量的地址
             long addr = reinterpret_cast<long>(it->parameter_blocks[i]);    // 得到该参数块的地址
             int size = block_sizes[i];  // 参数块大小，位姿是7，速度的bias是9
             // 把各个参数块都备份起来，使用unordered map避免重复参数块，之所以备份，是为了后面的状态保留
-            if (parameter_block_data.find(addr) == parameter_block_data.end())
+            if (parameter_block_data.find(addr) == parameter_block_data.end())  // parameter_block_data是整个优化变量的数据
             {
                 double *data = new double[size];
                 // 深拷贝
                 memcpy(data, it->parameter_blocks[i], sizeof(double) * size);
+                // 通过之前的优化变量的数据的地址和新开辟的内存数据进行关联
                 parameter_block_data[addr] = data;  // 地址->参数块实际内容的地址
             }
         }
@@ -224,29 +227,46 @@ void MarginalizationInfo::marginalize()
 {
     int pos = 0;
     // parameter_block_idx key是各个待边缘化参数块地址 value预设都是0
+    // 遍历待marg的优化变量的内存地址
     for (auto &it : parameter_block_idx)
     {
         it.second = pos;    // 这就是在所有参数中排序的idx，待边缘化的排在前面
         pos += localSize(parameter_block_size[it.first]);   // 因为要进行求导，因此大小是local size，具体一点就是使用李代数
+        // 注意：这里没有更新待marg的优化变量的parameter_block_idx，即待marg的优化变量的idx仍然为0
+        // 而下面添加其他不需要边缘化的变量时，更新了各自的parameter_block_idx
     }
 
     m = pos;    // 总共待边缘化的参数块总大小（不是个数）
     // 其他参数块
     for (const auto &it : parameter_block_size)
     {
+        // 如果这个变量不是是待marg的优化变量
         if (parameter_block_idx.find(it.first) == parameter_block_idx.end())
         {
+            // 就将这个待marg的变量id设为pos
+            // 之前在addResidualBlockInfo函数中，parameter_block_idx中仅仅有待边缘化的优化变量的内存地址的key，
+            // 而其对应value全部为0
             parameter_block_idx[it.first] = pos;    // 这样每个参数块的大小都能被正确找到
+            // pos加上这个变量的长度
             pos += localSize(it.second);
         }
     }
 
     n = pos - m;    // 其他参数块的总大小
 
+    /**
+     * 这上面的操作是进行了一个伪排序
+       遍历时的pos有两个作用   （1）存储参数块的维度总和，
+                            （2）存储变量的起始地址
+       先记录待边缘化的变量的起始地址，然后在记录其他变量的起始地址，这样方便边缘化时去除待边缘化的变量
+     */
+
     //ROS_DEBUG("marginalization, pos: %d, m: %d, n: %d, size: %d", pos, m, n, (int)parameter_block_idx.size());
 
+    // 通过上面的操作就会将所有的优化变量进行一个伪排序，待marg的优化变量的idx为0，其他的优化变量和其所在的位置相关
     TicToc t_summing;
-    Eigen::MatrixXd A(pos, pos);    // Ax = b预设大小
+    // Ax = b预设大小
+    Eigen::MatrixXd A(pos, pos);    // A和b的维度为总的优化变量的维度大小，即待优化的加上不需要优化的
     Eigen::VectorXd b(pos);
     A.setZero();
     b.setZero();
@@ -280,11 +300,13 @@ void MarginalizationInfo::marginalize()
 
     // 往A矩阵和b矩阵中填东西，利用多线程加速
     TicToc t_thread_summing;
+    // TODO 这里的线程数可调吗？
     pthread_t tids[NUM_THREADS];
     ThreadsStruct threadsstruct[NUM_THREADS];
     int i = 0;
-    for (auto it : factors)
+    for (auto it : factors)     // 将各个残差块的雅克比矩阵分配到各个线程中去
     {
+        // 分配方式是：线程0->线程1->线程2->线程3-> 线程0->线程1->线程2->线程3->...
         threadsstruct[i].sub_factors.push_back(it); // 每个线程均匀分配任务
         i++;
         i = i % NUM_THREADS;
@@ -300,7 +322,10 @@ void MarginalizationInfo::marginalize()
         threadsstruct[i].parameter_block_size = parameter_block_size;   // 大小
         threadsstruct[i].parameter_block_idx = parameter_block_idx; // 索引
         // 产生若干线程
+        // 分别构造矩阵
         int ret = pthread_create( &tids[i], NULL, ThreadsConstructA ,(void*)&(threadsstruct[i]));
+        // 因为这里构造信息矩阵时采用的正是parameter_block_idx作为构造顺序，
+        // 因此，就会自然而然地将待边缘化的变量构造在矩阵的左上方
         if (ret != 0)
         {
             ROS_WARN("pthread_create error");
@@ -321,36 +346,63 @@ void MarginalizationInfo::marginalize()
 
     //TODO
     // Amm矩阵的构建是为了保证其正定性
+    // 代码中求Amm的逆矩阵时，为了保证数值稳定性，做了Amm=1/2*(Amm+Amm^T)的运算，Amm本身是一个对称矩阵，所以等式成立
     Eigen::MatrixXd Amm = 0.5 * (A.block(0, 0, m, m) + A.block(0, 0, m, m).transpose());
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes(Amm);   // 特征值分解
 
     //ROS_ASSERT_MSG(saes.eigenvalues().minCoeff() >= -1e-4, "min eigenvalue %f", saes.eigenvalues().minCoeff());
-    // 一个逆矩阵的特征值是原矩阵的倒数，特征向量相同　select类似c++中 ? :运算符
+    // 一个逆矩阵的特征值是原矩阵的倒数，特征向量相同；select类似c++中 ? :运算符
     // 利用特征值取逆来构造其逆矩阵
+    // 对应理论讲解中的左上角矩阵的逆 Lambda_a
+    // 接着对Amm进行了特征值分解,再求逆，更加的快速。
+    // 实际上就是利用性质P^{-1}AP=Λ，则有A^{-1}=PΛ^{-1}P^{-1}，用来求得A^{-1}
     Eigen::MatrixXd Amm_inv = saes.eigenvectors() * Eigen::VectorXd((saes.eigenvalues().array() > eps).select(saes.eigenvalues().array().inverse(), 0)).asDiagonal() * saes.eigenvectors().transpose();
     //printf("error1: %f\n", (Amm * Amm_inv - Eigen::MatrixXd::Identity(m, m)).sum());
 
-    Eigen::VectorXd bmm = b.segment(0, m);  // 带边缘化的大小
-    Eigen::MatrixXd Amr = A.block(0, m, m, n);  // 对应的四块矩阵
-    Eigen::MatrixXd Arm = A.block(m, 0, n, m);
-    Eigen::MatrixXd Arr = A.block(m, m, n, n);
-    Eigen::VectorXd brr = b.segment(m, n); // 剩下的参数
-    A = Arr - Arm * Amm_inv * Amr;
+
+    // 设x_{m}为要被marg掉的状态量，x_{r}是与x_{m}相关的状态量，所以在最后我们要保存的是x_{r}的信息
+    //
+    //      |      |    |          |   |
+    //      |  Amm | Amr|  m       |bmm|        |x_{m}|
+    //  A = |______|____|      b = |__ |       A|x_{r}| = b
+    //      |  Arm | Arr|  n       |brr|
+    //      |      |    |          |   |
+    //  使用舒尔补:
+    //  C = Arr - Arm*Amm^{-1}Amr
+    //  d = brr - Arm*Amm^{-1}bmm
+
+    //舒尔补，上面这段代码边缘化掉xm变量，保留xb变量
+    Eigen::VectorXd bmm = b.segment(0, m);  // 待边缘化的大小，即g_a
+    // 对应的四块矩阵
+    Eigen::MatrixXd Amr = A.block(0, m, m, n);  // 对应理论讲解中的右上角矩阵 Lambda_b
+    Eigen::MatrixXd Arm = A.block(m, 0, n, m);  // 对应理论讲解中的左下角矩阵 Lambda_b^T
+    Eigen::MatrixXd Arr = A.block(m, m, n, n);  // 对应理论讲解中的右下角矩阵 Lambda_c
+    Eigen::VectorXd brr = b.segment(m, n); // 剩下的参数，即g_b
+    A = Arr - Arm * Amm_inv * Amr;      // 这里的A和b都是marg过的A和b,大小是发生了变化的
     b = brr - Arm * Amm_inv * bmm;
 
+    // 下面就是更新先验残差项
     // 这个地方根据Ax = b => JT*J = - JT * e
+    // 由于A是实对称矩阵，V^T=V^{-1}
     // 对A做特征值分解 A = V * S * VT,其中Ｓ是特征值构成的对角矩阵
     // 所以J = S^(1/2) * VT , 这样JT * J = (S^(1/2) * VT)T * S^(1/2) * VT = V * S^(1/2)T *  S^(1/2) * VT = V * S * VT(对角矩阵的转置等于其本身)
-    // e = -(JT)-1 * b = - (S^-(1/2) * V^-1) * b = - (S^-(1/2) * VT) * b
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes2(A);
+    // e = -(JT)-1 * b = - ((S^-(1/2))^T * V^-1) * b = - (S^-(1/2) * V^-1) * b = - (S^-(1/2) * VT) * b
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes2(A);    // 求更新后 A特征值
     // 对A矩阵取逆
     Eigen::VectorXd S = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array(), 0));
     Eigen::VectorXd S_inv = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array().inverse(), 0));
 
+    // 求取特征值及其逆的均方根
     Eigen::VectorXd S_sqrt = S.cwiseSqrt(); // 这个求得就是 S^(1/2)，不过这里是向量还不是矩阵
     Eigen::VectorXd S_inv_sqrt = S_inv.cwiseSqrt();
+    // 下面这段代码是从A和b中恢复出雅克比矩阵和残差
     // 边缘化为了实现对剩下参数块的约束，为了便于一起优化，就抽象成了残差和雅克比的形式，这样也形成了一种残差约束
+    // 分别指的是边缘化之后从信息矩阵A和b中恢复出来雅克比矩阵和残差向量；
+    // 两者会作为先验残差带入到下一轮的先验残差的雅克比和残差的计算当中去
+    // J = S^(1/2) * V^T
     linearized_jacobians = S_sqrt.asDiagonal() * saes2.eigenvectors().transpose();
+    // 由于前面preMarginalize中在构造 b 的时候没有加负号，这里也不加，J^TJ * x=-J^T e 这个方程的符号就不会变，是正确的
+    // -J^T e = b，那么 e = -(J^T)^{-1} * b = - (S^{-(1/2)} * V^{-1}) * b
     linearized_residuals = S_inv_sqrt.asDiagonal() * saes2.eigenvectors().transpose() * b;
     //std::cout << A << std::endl
     //          << std::endl;
@@ -373,7 +425,7 @@ std::vector<double *> MarginalizationInfo::getParameterBlocks(std::unordered_map
             keep_block_size.push_back(parameter_block_size[it.first]);  // 留下来的参数块大小 global size
             keep_block_idx.push_back(parameter_block_idx[it.first]);    // 留下来的在原向量中的排序
             keep_block_data.push_back(parameter_block_data[it.first]);  // 边缘化前各个参数块的值的备份
-            keep_block_addr.push_back(addr_shift[it.first]); // 对应的新地址
+            keep_block_addr.push_back(addr_shift[it.first]); // 对应的新地址的指针
         }
     }
     // 留下来的边缘化后的参数块总大小
@@ -396,7 +448,7 @@ MarginalizationFactor::MarginalizationFactor(MarginalizationInfo* _marginalizati
         cnt += it;
     }
     //printf("residual size: %d, %d\n", cnt, n);
-    set_num_residuals(marginalization_info->n); // 残差维数就是所有剩余状态量的维数和，这里时local size
+    set_num_residuals(marginalization_info->n); // 残差维数就是所有剩余状态量的维数和，这里是local size
 };
 
 /**
@@ -442,9 +494,10 @@ bool MarginalizationFactor::Evaluate(double const *const *parameters, double *re
             }
         }
     }
-    // 更新残差　边缘化后的先验误差 e = e0 + J * dx
+    // 更新残差 边缘化后的先验误差 e = e0 + J * dx
     // 个人理解：根据FEJ．雅克比保持不变，但是残差随着优化会变化，因此下面不更新雅克比　只更新残差
-    // 可以参考　https://blog.csdn.net/weixin_41394379/article/details/89975386
+    // 关于FEJ的理解可以参考 https://www.zhihu.com/question/52869487
+    // 下面这段代码可以参考 https://blog.csdn.net/weixin_41394379/article/details/89975386
     Eigen::Map<Eigen::VectorXd>(residuals, n) = marginalization_info->linearized_residuals + marginalization_info->linearized_jacobians * dx;
     if (jacobians)
     {

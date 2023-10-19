@@ -646,6 +646,14 @@ void Estimator::solveOdometry()
  */
 void Estimator::vector2double()
 {
+    // 可以看出来，这里面生成的优化变量由：
+    //      para_Pose（6维，相机位姿），存储时用四元数，所以为7维
+    //      para_SpeedBias（9维，相机速度、加速度偏置、角速度偏置）、
+    //      para_Ex_Pose（6维、相机IMU外参）、
+    //      para_Feature（1维，特征点深度）、
+    //      para_Td（1维，标定同步时间）
+    //五部分组成，在后面进行边缘化操作时这些优化变量都是当做整体看待。
+
     // KF的位姿
     for (int i = 0; i <= WINDOW_SIZE; i++)
     {
@@ -1032,7 +1040,7 @@ void Estimator::optimization()
         // 2、找到构造高斯牛顿下降时跟这些待边缘化相关的参数块有关的残差约束，那就是预积分约束，重投影约束，以及上一次边缘化约束
         // 3、这些约束连接的参数块中，不需要被边缘化的参数块，就是被提供先验约束的部分，也就是滑窗中剩下的位姿和速度零偏
 
-        //添加边缘化残差
+        // 第一步：首先添加上一次先验残差项（上一次待边缘化的参数与其他参数的约束关系）
         // 上一次的边缘化结果
         if (last_marginalization_info)
         {
@@ -1042,7 +1050,7 @@ void Estimator::optimization()
             {
                 // 涉及到的待边缘化的上一次边缘化留下来的当前参数块只有位姿和速度零偏
                 if (last_marginalization_parameter_blocks[i] == para_Pose[0] ||
-                    last_marginalization_parameter_blocks[i] == para_SpeedBias[0])
+                    last_marginalization_parameter_blocks[i] == para_SpeedBias[0])  // 需要marg掉的优化变量，也就是滑窗内第一个变量
                     drop_set.push_back(i);
             }
             // 处理方式和其他残差块相同
@@ -1052,10 +1060,12 @@ void Estimator::optimization()
                                                                            last_marginalization_parameter_blocks,
                                                                            drop_set);
 
+            // 调用addResidualBlockInfo()函数将各个残差以及残差涉及的优化变量添加入上面所述的MarginalizationInfo类的优化变量中
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
         // 只有第1个预积分和待边缘化参数块相连
         {
+            // 第二步：然后添加第0帧和第1帧之间的IMU预积分值以及第0帧和第1帧相关优化变量
             // 如果预积分累计积分的时间跨度超过了10，那么置信度就比较低，不适合拿来形成约束
             if (pre_integrations[1]->sum_dt < 10.0)
             {
@@ -1074,6 +1084,7 @@ void Estimator::optimization()
         }
         // 遍历视觉重投影的约束
         {
+            // 第三步：最后添加第一次观测滑窗中第0帧的路标点以及其他相关的滑窗中的帧的相关的优化变量
             int feature_index = -1;
             for (auto &it_per_id : f_manager.feature)
             {
@@ -1123,6 +1134,30 @@ void Estimator::optimization()
                 }
             }
         }
+        // 上面的三步添加残差以及优化变量的方式和后端线性优化中添加的方式相似，因为边缘化类应该就是仿照ceres写的
+        /**
+         * 每一步的步骤总结如下：
+         *    (1) 定义损失函数，
+         *          对于先验残差就是MarginalizationFactor，对于IMU就是IMUFactor，对于视觉就是ProjectionTdFactor，
+         *          这三个损失函数的类都是继承自ceres的损失函数类ceres::CostFunction，里面都重载了函数
+         *    (2) 定义ResidualBlockInfo
+         *          这一步是为了将不同的损失函数_cost_function以及优化变量_parameter_blocks统一起来再一起添加到marginalization_info中。
+         *          变量_loss_function是核函数，在VINS-mono的边缘化中仅仅视觉残差有用到couchy核函数，另外会设置需要被边缘话的优化变量的位置_drop_set，
+         *          这里对于不同损失函数又会有不同：
+                        1) 对于先验损失，其待边缘化优化变量是根据是否等于para_Pose[0]或者para_SpeedBias[0]，
+                           也就是说和第一帧相关的优化变量都作为边缘化的对象；
+                        2) 对于IMU，其输入的_drop_set是vector{0, 1}，
+                           也就是说其待边缘化变量是para_Pose[0], para_SpeedBias[0]，也是第一政相关的变量都作为边缘化的对象，这里值得注意的是和后端优化不同，这里只添加了第一帧和第二帧的相关变量作为优化变量，因此边缘化构造的信息矩阵会比后端优化构造的信息矩阵要小；
+                        3) 对于视觉，其输入的_drop_set是vector{0, 3}，
+                           也就是说其待边缘化变量是para_Pose[imu_i]和para_Feature[feature_index]，从这里可以看出来在VINS-mono的边缘化操作中会不仅仅会边缘化第一帧相关的优化变量，还会边缘化掉以第一帧为起始观察帧的路标点。
+         *    (3)将定义的residual_block_info添加到marginalization_info中
+         *       通过下面这一句:
+         *          marginalization_info->addResidualBlockInfo(residual_block_info);
+         *        这里其实就是分别将不同损失函数对应的优化变量、边缘化位置存入到parameter_block_sizes和parameter_block_idx中，
+         *        这里注意的是执行到这一步，parameter_block_idx中仅仅有待边缘化的优化变量的内存地址的key，而且其对应value全部为0；
+         *
+         */
+
         // 所有的残差块都收集好了
         TicToc t_pre_margin;
         // 进行预处理
@@ -1133,12 +1168,14 @@ void Estimator::optimization()
         // 边缘化操作
         marginalization_info->marginalize();
         ROS_DEBUG("marginalization %f ms", t_margin.toc());
-        // 即将滑窗，因此记录新地址对应的老地址
+        // 即将滑窗，因此记录老地址对应的新地址
         std::unordered_map<long, double *> addr_shift;
-        for (int i = 1; i <= WINDOW_SIZE; i++)
+        for (int i = 1; i <= WINDOW_SIZE; i++)  // 从1开始，因为第0帧的状态不要了
         {
+            // 这一步的操作指的是第i的位置存放的的是i-1的内容，这就意味着窗口向前移动了一格
             // 位姿和速度都要滑窗移动
-            addr_shift[reinterpret_cast<long>(para_Pose[i])] = para_Pose[i - 1];
+            // addr_shift的key是老地址，value是新地址的指针
+            addr_shift[reinterpret_cast<long>(para_Pose[i])] = para_Pose[i - 1];    // 因此para_Pose这些变量都是双指针变量，因此这一步是指针操作
             addr_shift[reinterpret_cast<long>(para_SpeedBias[i])] = para_SpeedBias[i - 1];
         }
         // 外参和时间延时不变
@@ -1152,8 +1189,12 @@ void Estimator::optimization()
         vector<double *> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);
 
         if (last_marginalization_info)
-            delete last_marginalization_info;
-        last_marginalization_info = marginalization_info;   // 本次边缘化的所有信息
+            delete last_marginalization_info;   // 删除掉上一次的marg相关的内容
+        // last_marginalization_info就是保留下来的先验残差信息，
+        // 包括保留下来的雅克比linearized_jacobians、残差linearized_residuals、
+        //    保留下来的和边缘化有关的数据长度keep_block_size、顺序keep_block_idx以及数据keep_block_data。
+        last_marginalization_info = marginalization_info;   // 本次边缘化的所有信息，marg相关内容的递归
+        // 优化变量的递归，这里面仅仅是指针
         last_marginalization_parameter_blocks = parameter_blocks;   // 代表该次边缘化对某些参数块形成约束，这些参数块在滑窗之后的地址
         
     }
@@ -1162,6 +1203,7 @@ void Estimator::optimization()
         // 要求有上一次边缘化的结果同时，即将被margin掉的在上一次边缘化后的约束中
         // 预积分结果合并，因此只有位姿margin掉
         if (last_marginalization_info &&
+            // 上一次边缘化的结果有没有对倒数第二帧形成约束，返回为true才会执行下面的程序
             std::count(std::begin(last_marginalization_parameter_blocks), std::end(last_marginalization_parameter_blocks), para_Pose[WINDOW_SIZE - 1]))
         {
 
