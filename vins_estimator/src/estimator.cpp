@@ -1115,6 +1115,8 @@ void Estimator::optimization()
                         ProjectionTdFactor *f_td = new ProjectionTdFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
                                                                           it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td,
                                                                           it_per_id.feature_per_frame[0].uv.y(), it_per_frame.uv.y());
+                        // 最老帧看到的每一个视觉点和其他帧构成的视觉重投影约束**包含的参数块**是：$T_0, T_j, T_{ic}, \lambda_i$，
+                        // **要边缘化掉**的参数块是 $ T_0, \lambda_i$
                         ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f_td, loss_function,
                                                                                         vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]},
                                                                                         vector<int>{0, 3});
@@ -1194,6 +1196,8 @@ void Estimator::optimization()
         // 包括保留下来的雅克比linearized_jacobians、残差linearized_residuals、
         //    保留下来的和边缘化有关的数据长度keep_block_size、顺序keep_block_idx以及数据keep_block_data。
         last_marginalization_info = marginalization_info;   // 本次边缘化的所有信息，marg相关内容的递归
+        // parameter_blocks代表该次边缘化对某些参数块形成约束，这些参数块在滑窗之后的存储的内存地址
+        // 同时这个值也进行保存，用于下次非线性优化之前对这些参数块添加边缘化的先验约束
         // 优化变量的递归，这里面仅仅是指针
         last_marginalization_parameter_blocks = parameter_blocks;   // 代表该次边缘化对某些参数块形成约束，这些参数块在滑窗之后的地址
         
@@ -1220,7 +1224,7 @@ void Estimator::optimization()
                     if (last_marginalization_parameter_blocks[i] == para_Pose[WINDOW_SIZE - 1])
                         drop_set.push_back(i);
                 }
-                // construct new marginlization_factor
+                // construct new marginalization_factor
                 // 这里只会更新一下margin factor
                 MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
                 ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(marginalization_factor, NULL,

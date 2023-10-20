@@ -9,6 +9,9 @@
 
 #include <ceres/ceres.h>
 
+// 使用解析求导，定义CostFunction必须继承于SizedCostFunction
+// <15,7,9,7,9>表示的是残差的维度和参数块的维度。
+// 15表示残差维度是15；7,9,7,9表示有四个参数块要优化，维度分别是7,9,7,9
 class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 {
   public:
