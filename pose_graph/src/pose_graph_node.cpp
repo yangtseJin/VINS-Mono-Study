@@ -316,21 +316,25 @@ void extrinsic_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     m_process.unlock();
 }
 
+// 主线程
 // 回环检测主要处理函数
 void process()
 {
+    // 1.先判断是否需要回环检测
     if (!LOOP_CLOSURE)  // 不检测回环就啥都不干
         return;
-    while (true)
+    while (true)// 不断循环
     {
+        // 三个参数图像、点云、VIO位姿
         sensor_msgs::ImageConstPtr image_msg = NULL;
         sensor_msgs::PointCloudConstPtr point_msg = NULL;
         nav_msgs::Odometry::ConstPtr pose_msg = NULL;
 
         // find out the messages with same time stamp
+        // 2.得到具有相同时间戳的pose_msg、image_msg、point_msg
         m_buf.lock();
         // 做一个时间戳对齐，涉及到原图，KF位姿以及KF对应地图点
-        if(!image_buf.empty() && !point_buf.empty() && !pose_buf.empty())
+        if(!image_buf.empty() && !point_buf.empty() && !pose_buf.empty())   // 首先三个都不为空
         {
             // 原图时间戳比另外两个晚，只能扔掉早于第一个原图的消息
             if (image_buf.front()->header.stamp.toSec() > pose_buf.front()->header.stamp.toSec())
@@ -366,18 +370,23 @@ void process()
         }
         m_buf.unlock();
         // 至此取出了时间戳同步的原图，KF和地图点信息
+
+        // 3.构建pose_graph中用到的关键帧，然后每隔SKIP_CNT，将将距上一关键帧距离（平移向量的模）超过SKIP_DIS的图像创建为关键帧。
         if (pose_msg != NULL)   // 判断一下是否有效
         {
             //printf(" pose time %f \n", pose_msg->header.stamp.toSec());
             //printf(" point time %f \n", point_msg->header.stamp.toSec());
             //printf(" image time %f \n", image_msg->header.stamp.toSec());
+
             // skip fisrt few
+            // 3.1 剔除最开始的SKIP_FIRST_CNT帧，
             if (skip_first_cnt < SKIP_FIRST_CNT)    // 跳过最开始的SKIP_FIRST_CNT帧
             {
                 skip_first_cnt++;
                 continue;
             }
 
+            // 3.2 每隔SKIP_CNT帧进行一次  SKIP_CNT=0
             if (skip_cnt < SKIP_CNT)    // 降频，每隔SKIP_CNT帧处理一次
             {
                 skip_cnt++;
@@ -387,6 +396,7 @@ void process()
             {
                 skip_cnt = 0;
             }
+            // 3.3 ROS图像转为Opencv类型
             // 通过cvbridge得到opencv格式的图像
             cv_bridge::CvImageConstPtr ptr;
             if (image_msg->encoding == "8UC1")
@@ -414,6 +424,7 @@ void process()
                                      pose_msg->pose.pose.orientation.x,
                                      pose_msg->pose.pose.orientation.y,
                                      pose_msg->pose.pose.orientation.z).toRotationMatrix();
+            // 3.4 将距上一关键帧距离（平移向量的模）超过SKIP_DIS的图像创建为关键帧
             if((T - last_t).norm() > SKIP_DIS)  // 要求KF相隔必要的平移距离
             {
                 vector<cv::Point3f> point_3d;   // VIO世界坐标系下的地图点坐标
@@ -442,11 +453,13 @@ void process()
 
                     //printf("u %f, v %f \n", p_2d_uv.x, p_2d_uv.y);
                 }
+                // 3.5 创建为关键帧类型并加入到posegraph中
                 // 创建回环检测节点的KF
                 KeyFrame* keyframe = new KeyFrame(pose_msg->header.stamp.toSec(), frame_index, T, R, image,
                                    point_3d, point_2d_uv, point_2d_normal, point_id, sequence);   
                 m_process.lock();
                 start_flag = 1;
+                // 在posegraph中添加关键帧，flag_detect_loop=1回环检测
                 posegraph.addKeyFrame(keyframe, 1); // 回环检测核心入口函数
                 m_process.unlock();
                 frame_index++;
@@ -454,6 +467,7 @@ void process()
             }
         }
 
+        // 4.休眠5ms
         std::chrono::milliseconds dura(5);
         std::this_thread::sleep_for(dura);
     }
@@ -486,10 +500,12 @@ void command()
 
 int main(int argc, char **argv)
 {
+    // 1.ROS初始化，设置句柄
     ros::init(argc, argv, "pose_graph");
     ros::NodeHandle n("~");
     posegraph.registerPub(n);
 
+    // 2.读取参数
     // read param
     n.getParam("visualization_shift_x", VISUALIZATION_SHIFT_X); // 这两个shift基本都是0
     n.getParam("visualization_shift_y", VISUALIZATION_SHIFT_Y);
@@ -511,15 +527,18 @@ int main(int argc, char **argv)
     LOOP_CLOSURE = fsSettings["loop_closure"];
     std::string IMAGE_TOPIC;
     int LOAD_PREVIOUS_POSE_GRAPH;
+    // 3.如果需要进行回环检测则读取词典和BRIEF描述子的模板文件，同时读取config中的其他参数、设置带回环的结果输出路径。
     if (LOOP_CLOSURE)
     {
         ROW = fsSettings["image_height"];   // 图片分辨率
         COL = fsSettings["image_width"];
+        // 3.1读取字典
         std::string pkg_path = ros::package::getPath("pose_graph");
         string vocabulary_file = pkg_path + "/../support_files/brief_k10L6.bin";    // 训练好的二进制词袋的路径
         cout << "vocabulary_file" << vocabulary_file << endl;
         posegraph.loadVocabulary(vocabulary_file);  // 加载二进制词袋
 
+        // 3.2读取BRIEF描述子的模板文件
         BRIEF_PATTERN_FILE = pkg_path + "/../support_files/brief_pattern.yml";  // 计算描述子pattern的文件
         cout << "BRIEF_PATTERN_FILE" << BRIEF_PATTERN_FILE << endl;
         // 和前面一样，生成一个相机模型
@@ -542,6 +561,7 @@ int main(int argc, char **argv)
         fout.close();
         fsSettings.release();
 
+        // 3.3加载先前的位姿图
         if (LOAD_PREVIOUS_POSE_GRAPH)
         {
             printf("load pose graph\n");
@@ -560,6 +580,7 @@ int main(int argc, char **argv)
 
     fsSettings.release();
 
+    // 4.订阅话题topic并执行各自回调函数
     ros::Subscriber sub_imu_forward = n.subscribe("/vins_estimator/imu_propagate", 2000, imu_forward_callback);
     ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 2000, vio_callback);
     ros::Subscriber sub_image = n.subscribe(IMAGE_TOPIC, 2000, image_callback);
@@ -568,16 +589,20 @@ int main(int argc, char **argv)
     ros::Subscriber sub_point = n.subscribe("/vins_estimator/keyframe_point", 2000, point_callback);
     ros::Subscriber sub_relo_relative_pose = n.subscribe("/vins_estimator/relo_relative_pose", 2000, relo_relative_pose_callback);
 
+    // 5.发布的话题topic
     pub_match_img = n.advertise<sensor_msgs::Image>("match_image", 1000);
     pub_camera_pose_visual = n.advertise<visualization_msgs::MarkerArray>("camera_pose_visual", 1000);
     pub_key_odometrys = n.advertise<visualization_msgs::Marker>("key_odometrys", 1000);
     pub_vio_path = n.advertise<nav_msgs::Path>("no_loop_path", 1000);
     pub_match_points = n.advertise<sensor_msgs::PointCloud>("match_points", 100);
 
+    // 6. 创建两个线程，process 和 command
     std::thread measurement_process;
     std::thread keyboard_command_process;
 
+    // pose graph主线程
     measurement_process = std::thread(process);
+    // 键盘操作的线程
     keyboard_command_process = std::thread(command);
 
 

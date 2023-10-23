@@ -52,6 +52,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     //shift to base frame
     Vector3d vio_P_cur;
     Matrix3d vio_R_cur;
+    // 1.建一个新的图像序列
     if (sequence_cnt != cur_kf->sequence)   // 发生了sequence的跳变
     {
         sequence_cnt++;
@@ -64,47 +65,59 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
         r_drift = Eigen::Matrix3d::Identity();
         m_drift.unlock();
     }
+    // 2.getVioPose（）获取当前帧的位姿vio_P_cur、vio_R_cur并更新updateVioPose
     // 更新一下VIO位姿
+    // 从word->到vio坐标
     cur_kf->getVioPose(vio_P_cur, vio_R_cur);   // 得到VIO节点的位姿
+    // update 回环修正后的消除累计误差的位姿
     vio_P_cur = w_r_vio * vio_P_cur + w_t_vio;  // 回环修正后的消除累计误差的位姿
     vio_R_cur = w_r_vio *  vio_R_cur;
     cur_kf->updateVioPose(vio_P_cur, vio_R_cur);    // 更新VIO位姿
     cur_kf->index = global_index;   // 赋值索引
     global_index++;
-	int loop_index = -1;
+	int loop_index = -1;    // 重置回环索引号
     if (flag_detect_loop)
     {
         TicToc tmp_t;
+        // 3.detectLoop（）回环检测，返回回环候选帧的索引loop_index
         loop_index = detectLoop(cur_kf, cur_kf->index);
     }
     else
     {
         addKeyFrameIntoVoc(cur_kf);
     }
+    // 4.存在回环候选帧
 	if (loop_index != -1)   // 代表找到了有效的回环帧
 	{
         //printf(" %d detect loop with %d \n", cur_kf->index, loop_index);
+        // 4.1 获取回环候选帧
         KeyFrame* old_kf = getKeyFrame(loop_index); // 得到回环帧的指针
 
+        // 当前帧与回环候选帧进行描述子匹配,如果成功则确定存在回环
         if (cur_kf->findConnection(old_kf)) // 如果确定两者回环
         {
+            // earliest_loop_index为最早的回环候选帧
             // 更新最早回环帧，用来确定全局优化的范围
             if (earliest_loop_index > loop_index || earliest_loop_index == -1)
                 earliest_loop_index = loop_index;
 
+            // 4.2 计算当前帧与回环帧的相对位姿，纠正当前帧位姿w_P_cur、w_R_cur
             Vector3d w_P_old, w_P_cur, vio_P_cur;
             Matrix3d w_R_old, w_R_cur, vio_R_cur;
             old_kf->getVioPose(w_P_old, w_R_old);
             cur_kf->getVioPose(vio_P_cur, vio_R_cur);
 
+            // 获取当前帧与回环帧的相对位姿relative_q、relative_t
             Vector3d relative_t;
             Quaterniond relative_q;
             // T_old_cur
             relative_t = cur_kf->getLoopRelativeT();
             relative_q = (cur_kf->getLoopRelativeQ()).toRotationMatrix();
+            // 重新计算当前帧位姿w_P_cur、w_R_cur
             // T_w_old * T_old_cur = T_w_cur,这就是回环矫正后当前帧的位姿
             w_P_cur = w_R_old * relative_t + w_P_old;
             w_R_cur = w_R_old * relative_q;
+            // 回环得到的位姿和VIO位姿之间的偏移量shift_r、shift_t
             double shift_yaw;
             Matrix3d shift_r;
             Vector3d shift_t; 
@@ -114,6 +127,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
             shift_r = Utility::ypr2R(Vector3d(shift_yaw, 0, 0));
             shift_t = w_P_cur - w_R_cur * vio_R_cur.transpose() * vio_P_cur; 
             // shift vio pose of whole sequence to the world frame
+            // 4.3 如果存在多个图像序列，则将所有图像序列都合并到世界坐标系下
             // 如果这两个不是同一个sequence，并且当前sequence没有跟之前合并
             if (old_kf->sequence != cur_kf->sequence && sequence_loop[cur_kf->sequence] == 0)
             {  
@@ -140,6 +154,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
                 // 代表这个序列已经跟之前的序列合并过了，这里实现的也就是一个序列的合并
                 sequence_loop[cur_kf->sequence] = 1;
             }
+            // 4.4 将当前帧放入优化队列中
             m_optimize_buf.lock();
             optimize_buf.push(cur_kf->index);   // 相当于通知4dof优化线程开始干活
             m_optimize_buf.unlock();
@@ -148,11 +163,14 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
 	m_keyframelist.lock();
     Vector3d P;
     Matrix3d R;
+    // 5.获取VIO当前帧的位姿P、R，根据偏移量得到实际位姿
     cur_kf->getVioPose(P, R);
     P = r_drift * P + t_drift;  // 根据全局优化后进行位姿调整
     R = r_drift * R;
+    // 更新当前帧的位姿P、R
     cur_kf->updatePose(P, R);
     // 下面是可视化部分
+    // 6.发布path[sequence_cnt]
     Quaterniond Q{R};
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = ros::Time(cur_kf->time_stamp);
@@ -167,6 +185,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     path[sequence_cnt].poses.push_back(pose_stamped);
     path[sequence_cnt].header = pose_stamped.header;
 
+    // 7.保存闭环轨迹到VINS_RESULT_PATH
     if (SAVE_LOOP_PATH)
     {
         ofstream loop_path_file(VINS_RESULT_PATH, ios::app);
@@ -184,6 +203,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
               << endl;
         loop_path_file.close();
     }
+    // 8.draw local connection
     //draw local connection
     if (SHOW_S_EDGE)
     {
@@ -202,6 +222,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
             rit++;
         }
     }
+    // 当前帧与其回环帧连线
     if (SHOW_L_EDGE)
     {
         if (cur_kf->has_loop)
@@ -349,16 +370,19 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
     //first query; then add this frame into database!
     QueryResults ret;
     TicToc t_query;
+    // 1.查询字典数据库，得到与每一帧的相似度评分ret
     // 调用词袋查询接口，查询结果是ret，最多返回4个备选KF，查找距离当前至少50帧的KF
     db.query(keyframe->brief_descriptors, ret, 4, frame_index - 50);
     //printf("query time: %f", t_query.toc());
     //cout << "Searching for Image " << frame_index << ". " << ret << endl;
 
+    // 2.添加当前关键帧到字典数据库中
     TicToc t_add;
     // 当然也会把当前帧送进数据库中，便于后续帧的查询
     db.add(keyframe->brief_descriptors);
     //printf("add feature time: %f", t_add.toc());
     // ret[0] is the nearest neighbour's score. threshold change with neighour score
+    // 3.通过相似度评分判断是否存在回环候选帧
     bool find_loop = false;
     cv::Mat loop_result;
     if (DEBUG_IMAGE)
@@ -379,6 +403,7 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
             cv::hconcat(loop_result, tmp_image, loop_result);
         }
     }
+    // 确保与相邻帧具有好的相似度评分
     // a good match with its nerghbour
     // ret按照得分大小降序排列的，这里确保返回的候选KF数目至少一个且得分满足要求
     if (ret.size() >= 1 &&ret[0].Score > 0.05)
@@ -387,6 +412,7 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
         {
             //if (ret[i].Score > ret[0].Score * 0.3)
             // 如果有大于一个候选帧且得分满足要求
+            // 评分大于0.015则认为是回环候选帧
             if (ret[i].Score > 0.015)
             {          
                 find_loop = true;   // 就认为找到回环了
@@ -408,6 +434,8 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
         cv::waitKey(20);
     }
 */
+    // 4.对于索引值大于50的关键帧才考虑进行回环,即前50帧不回环
+    // 返回评分大于0.015的最早的关键帧索引min_index
     if (find_loop && frame_index > 50)  // 认为找到了回环并且当前帧是第50帧以后
     {
         int min_index = -1;
@@ -441,7 +469,8 @@ void PoseGraph::addKeyFrameIntoVoc(KeyFrame* keyframe)
 
 /**
  * @brief 如果找到回环，该线程就执行位姿优化
- * 
+ *
+ *      四自由度位姿图优化
  */
 void PoseGraph::optimize4DoF()
 {
@@ -449,6 +478,7 @@ void PoseGraph::optimize4DoF()
     {
         int cur_index = -1;
         int first_looped_index = -1;
+        // 取出最新一个待优化帧作为当前帧
         m_optimize_buf.lock();
         // 取出最新的形成回环的当前帧
         while(!optimize_buf.empty())
@@ -493,6 +523,8 @@ void PoseGraph::optimize4DoF()
             // 遍历KF的list
             for (it = keyframelist.begin(); it != keyframelist.end(); it++)
             {
+                // 找到第一个回环候选帧，
+                // 回环检测到帧以前的都略过
                 if ((*it)->index < first_looped_index)  // idx小于最早回环帧就算了
                     continue;
                 (*it)->local_index = i; // 这个是在本次优化中的idx
@@ -515,6 +547,7 @@ void PoseGraph::optimize4DoF()
                 // 只有yaw角参与优化，成为参数块
                 problem.AddParameterBlock(euler_array[i], 1, angle_local_parameterization);
                 problem.AddParameterBlock(t_array[i], 3);
+                // 回环检测到的帧参数设为固定
                 // 最早回环帧以及加载进来的地图保持不变，不进行优化
                 if ((*it)->index == first_looped_index || (*it)->sequence == 0)
                 {   
@@ -524,6 +557,7 @@ void PoseGraph::optimize4DoF()
 
                 //add edge
                 // 建立约束，每一帧和之前5帧建立约束关系，找到这一帧前面5帧，并且需要他们是一个序列中的KF
+                // 对于每个i, 只计算它之前五个的位置和yaw残差
                 for (int j = 1; j < 5; j++)
                 {
                   if (i - j >= 0 && sequence_array[i] == sequence_array[i-j])
@@ -545,8 +579,9 @@ void PoseGraph::optimize4DoF()
 
                 //add loop edge
                 // 如果这一帧有回环帧
-                if((*it)->has_loop)
+                if((*it)->has_loop)     // 如果检测到回环
                 {
+                    // 必须回环检测的帧号大于或者等于当前帧的回环检测匹配帧号
                     assert((*it)->loop_index >= first_looped_index);
                     int connected_index = getKeyFrame((*it)->loop_index)->local_index;  // 得到回环帧在这次优化中的idx
                     Vector3d euler_conncected = Utility::R2ypr(q_array[connected_index].toRotationMatrix());
@@ -580,6 +615,7 @@ void PoseGraph::optimize4DoF()
             */
             m_keyframelist.lock();
             i = 0;
+            // 根据优化后的参数更新参与优化的关键帧的位姿
             // 将优化后的位姿恢复
             for (it = keyframelist.begin(); it != keyframelist.end(); it++)
             {
@@ -596,6 +632,7 @@ void PoseGraph::optimize4DoF()
                 i++;
             }
 
+            // 根据当前帧的drift，更新全部关键帧位姿
             Vector3d cur_t, vio_t;
             Matrix3d cur_r, vio_r;
             cur_kf->getPose(cur_t, cur_r);  // 最新优化后的位姿

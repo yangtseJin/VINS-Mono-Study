@@ -122,13 +122,14 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
         linear_acceleration_buf[frame_count].push_back(linear_acceleration);
         angular_velocity_buf[frame_count].push_back(angular_velocity);
         // 又是一个中值积分，更新滑窗中状态量，本质是给非线性优化提供可信的初始值
+        // 注意这里计算的是公式中的PVQ,而不是预积分。这里积分的作用上面也说了，就是给后端优化提供较好的初始值
         int j = frame_count;         
-        Vector3d un_acc_0 = Rs[j] * (acc_0 - Bas[j]) - g;
+        Vector3d un_acc_0 = Rs[j] * (acc_0 - Bas[j]) - g;   // 这里Rs[j]就是公式中的Rw_bk
         Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - Bgs[j];
-        Rs[j] *= Utility::deltaQ(un_gyr * dt).toRotationMatrix();
+        Rs[j] *= Utility::deltaQ(un_gyr * dt).toRotationMatrix();   // 这里更新了Rs,也就是公式中的Rw_bk+1
         Vector3d un_acc_1 = Rs[j] * (linear_acceleration - Bas[j]) - g;
         Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
-        Ps[j] += dt * Vs[j] + 0.5 * dt * dt * un_acc;
+        Ps[j] += dt * Vs[j] + 0.5 * dt * dt * un_acc;   // 注意这里用的就是Vs[j],而不是平均值，这是位移公式决定的
         Vs[j] += dt * un_acc;
     }
     acc_0 = linear_acceleration;
@@ -1305,6 +1306,7 @@ void Estimator::slideWindow()
                 angular_velocity_buf[i].swap(angular_velocity_buf[i + 1]);
 
                 Headers[i] = Headers[i + 1];
+                // i最大是WINDOW_SIZE - 1,所以交换后，WINDOW_SIZE的地方变成滑窗中第0帧的数据
                 Ps[i].swap(Ps[i + 1]);
                 Vs[i].swap(Vs[i + 1]);
                 Bas[i].swap(Bas[i + 1]);
@@ -1319,6 +1321,7 @@ void Estimator::slideWindow()
             Bgs[WINDOW_SIZE] = Bgs[WINDOW_SIZE - 1];
             // 预积分量就得置零
             delete pre_integrations[WINDOW_SIZE];
+            // 用最近的一些变量来新生成一个预积分类，然后等待最新的IMU数据到来，进行下一次的预积分
             pre_integrations[WINDOW_SIZE] = new IntegrationBase{acc_0, gyr_0, Bas[WINDOW_SIZE], Bgs[WINDOW_SIZE]};
             // buffer清空，等待新的数据来填
             dt_buf[WINDOW_SIZE].clear();
@@ -1352,6 +1355,10 @@ void Estimator::slideWindow()
         if (frame_count == WINDOW_SIZE)
         {
             // 将最后两个预积分观测合并成一个
+            // dt_buf[frame_count]是最后一帧图像对应的所有的IMU值，
+            // dt_buf[frame_count-1]是倒数第二帧（被边缘化掉的）图像对应的所有的IMU值，
+            // 所以这里把两个预积分合成一个，就是把最后一帧图像的IMU值加入到倒数第二帧的IMU值中，
+            // 然后重新进行传播，计算预积分、协方差等
             for (unsigned int i = 0; i < dt_buf[frame_count].size(); i++)
             {
                 double tmp_dt = dt_buf[frame_count][i];
@@ -1373,6 +1380,7 @@ void Estimator::slideWindow()
             Bgs[frame_count - 1] = Bgs[frame_count];
             // reset最新预积分量
             delete pre_integrations[WINDOW_SIZE];
+            // 这里不new的话就要赋值成nullptr,否则会产生野指针的问题
             pre_integrations[WINDOW_SIZE] = new IntegrationBase{acc_0, gyr_0, Bas[WINDOW_SIZE], Bgs[WINDOW_SIZE]};
             // clear相关buffer
             dt_buf[WINDOW_SIZE].clear();
