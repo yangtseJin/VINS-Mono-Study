@@ -1,8 +1,18 @@
-这是VINS-Mono开源代码的注释版本，方便大家学习这款非常优秀的VIO框架，原git库地址https://github.com/HKUST-Aerial-Robotics/VINS-Mono
+这是港科大HKUST的开源代码VINS-Mono的注释学习版本
 
-关于代码的注释会不定期更新，欢迎关注
+是经典的VIO框架，原github库地址 : 
 
-如果本仓库对你有用，欢迎star一下满足本人的虚荣心～
+https://github.com/HKUST-Aerial-Robotics/VINS-Mono
+
+关于代码的注释会不定期更新，欢迎关注和 star
+
+**如果这个项目对你有用，请点击一下 star！**
+
+**If this project is useful to you, please star this project!**
+
+项目地址：https://github.com/yangtseJin/VINS-Mono-Study
+
+Comments created by YangtseJin
 
 # VINS-Mono
 ## A Robust and Versatile Monocular Visual-Inertial State Estimator
